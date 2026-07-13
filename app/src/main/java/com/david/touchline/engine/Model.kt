@@ -93,7 +93,7 @@ data class Fixture(
 )
 
 @Serializable
-enum class EventType { GOAL, CHANCE, SAVE, CARD, INFO }
+enum class EventType { GOAL, CHANCE, SAVE, CARD, INFO, FREEKICK, PENALTY, CORNER }
 
 @Serializable
 data class MatchEvent(
