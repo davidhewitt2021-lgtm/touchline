@@ -97,7 +97,44 @@ fun HomeScreen(vm: GameViewModel) {
 
         item {
             var confirm by remember { mutableStateOf(false) }
-            TextButton(onClick = { confirm = true }) { Text("Abandon save", color = MutedGrass, fontSize = 12.sp) }
+            var updateMsg by remember { mutableStateOf<String?>(null) }
+            var updateInfo by remember { mutableStateOf<Updater.UpdateInfo?>(null) }
+            var checking by remember { mutableStateOf(false) }
+            val context = androidx.compose.ui.platform.LocalContext.current
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(
+                    enabled = !checking,
+                    onClick = {
+                        checking = true
+                        updateMsg = null
+                        Updater.check(com.david.touchline.BuildConfig.VERSION_CODE) { info, err ->
+                            checking = false
+                            updateInfo = info
+                            updateMsg = when {
+                                info != null -> "Build ${info.buildNumber} available"
+                                err != null -> err
+                                else -> "You're on the latest build"
+                            }
+                        }
+                    }
+                ) { Text(if (checking) "Checking…" else "Check for updates", color = TouchLime, fontSize = 12.sp) }
+                TextButton(onClick = { confirm = true }) { Text("Abandon save", color = MutedGrass, fontSize = 12.sp) }
+            }
+            updateMsg?.let { msg ->
+                Text(msg, color = MutedGrass, fontSize = 12.sp)
+                updateInfo?.let { info ->
+                    Button(
+                        onClick = { Updater.openDownload(context, info.downloadUrl) },
+                        colors = ButtonDefaults.buttonColors(containerColor = TouchLime),
+                        modifier = Modifier.padding(top = 6.dp)
+                    ) { Text("Download update", fontWeight = FontWeight.Bold) }
+                }
+            }
+            Text(
+                "Touchline v${com.david.touchline.BuildConfig.VERSION_NAME}",
+                color = MutedGrass.copy(alpha = 0.6f), fontSize = 10.sp
+            )
             if (confirm) {
                 AlertDialog(
                     onDismissRequest = { confirm = false },

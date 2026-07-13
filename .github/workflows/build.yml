@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,11 +23,38 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Build debug APK
-        run: gradle assembleDebug --no-daemon
+      - name: Decode signing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$HOME/touchline.keystore"
+            echo "KEYSTORE_PATH=$HOME/touchline.keystore" >> "$GITHUB_ENV"
+          else
+            echo "No keystore secret set - building unsigned debug instead."
+          fi
 
-      - name: Upload APK
+      - name: Build APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_PATH" ]; then
+            gradle assembleRelease --no-daemon
+            cp app/build/outputs/apk/release/app-release.apk Touchline.apk
+          else
+            gradle assembleDebug --no-daemon
+            cp app/build/outputs/apk/debug/app-debug.apk Touchline.apk
+          fi
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Touchline build ${{ github.run_number }}
+          files: Touchline.apk
+
+      - name: Upload artifact (backup)
         uses: actions/upload-artifact@v4
         with:
-          name: touchline-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: touchline-apk
+          path: Touchline.apk
