@@ -4,33 +4,33 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
 <style>
-  html, body { margin: 0; padding: 0; overflow: hidden; background: #0B1A12; }
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #060D08; }
   canvas { display: block; }
 </style>
 <script src="three.min.js"></script>
 </head>
 <body>
 <script>
-// Touchline 3D match viewer, v2.
-// Kotlin drives playback with sf(f) where f is a FRACTIONAL frame index;
-// positions are interpolated between the two neighbouring frames, so the
-// motion is smooth regardless of sim frame spacing.
-// Frame layout: [ballX, ballY, ballZ, p0x, p0y, ..., p21x, p21y] (metres).
+// Touchline 3D match viewer, v3 — cinematic pass.
+// Filmic tone mapping, night-match floodlighting, crowd in the stands,
+// a comet trail on the ball, dynamic zoom, and a goal-camera swoop.
+// Driven from Kotlin: sf(fractionalFrame), goalCam().
 
 var PW = 105, PH = 68;
 var frames = [];
-var players = [];        // { group, body, legL, legR, shadow, runPhase, px, pz, faceAngle }
-var ball, ballShadow;
+var players = [];
+var ball, ballShadow, trail = [];
 var scene, camera, renderer;
 var skinTones = [0xC8956D, 0x8D5524, 0xE0AC69, 0x5C3A21, 0xF1C27D, 0x3B2219];
+var TRAIL_N = 10;
 
 function init(homeP, homeS, awayP, awayS) {
   var hp = parseInt(homeP, 16), hs = parseInt(homeS, 16);
   var ap = parseInt(awayP, 16), as = parseInt(awayS, 16);
 
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0B1A12);
-  scene.fog = new THREE.Fog(0x0B1A12, 140, 300);
+  scene.background = new THREE.Color(0x060D08);
+  scene.fog = new THREE.Fog(0x060D08, 130, 280);
 
   camera = new THREE.PerspectiveCamera(36, window.innerWidth / window.innerHeight, 0.1, 500);
   camera.position.set(PW / 2, 30, PH + 40);
@@ -38,15 +38,22 @@ function init(homeP, homeS, awayP, awayS) {
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.15;
   document.body.appendChild(renderer.domElement);
 
-  scene.add(new THREE.AmbientLight(0xffffff, 0.8));
-  var sun = new THREE.DirectionalLight(0xfffbe8, 0.65);
-  sun.position.set(40, 90, 30);
-  scene.add(sun);
+  // Night-match lighting: cool sky bounce + warm floodlights
+  scene.add(new THREE.HemisphereLight(0x8fb5ff, 0x0a2012, 0.55));
+  var key = new THREE.DirectionalLight(0xfff2d0, 0.95);
+  key.position.set(30, 70, 45);
+  scene.add(key);
+  var fill = new THREE.DirectionalLight(0xcfe0ff, 0.35);
+  fill.position.set(-40, 50, -30);
+  scene.add(fill);
 
   buildPitch();
   buildStands();
+  buildFloodlights();
   for (var i = 0; i < 22; i++) {
     var isHome = i < 11;
     var isGK = (i === 0 || i === 11);
@@ -57,6 +64,7 @@ function init(homeP, homeS, awayP, awayS) {
     ));
   }
   buildBall();
+  buildTrail();
 
   window.addEventListener('resize', onResize);
   renderer.render(scene, camera);
@@ -71,21 +79,33 @@ function onResize() {
 
 // --------------------------------------------------------------- pitch ----
 
-function stripeTexture() {
+function grassTexture() {
   var c = document.createElement('canvas');
-  c.width = 512; c.height = 512;
+  c.width = 1024; c.height = 1024;
   var g = c.getContext('2d');
-  for (var i = 0; i < 10; i++) {
-    g.fillStyle = (i % 2 === 0) ? '#14572E' : '#1A6437';
-    g.fillRect(i * 51.2, 0, 52.2, 512);
+  for (var i = 0; i < 12; i++) {
+    g.fillStyle = (i % 2 === 0) ? '#175C31' : '#1D6A3A';
+    g.fillRect(i * 1024 / 12, 0, 1024 / 12 + 1, 1024);
   }
+  // Subtle noise so the surface reads as turf, not plastic
+  for (var n = 0; n < 9000; n++) {
+    var x = Math.random() * 1024, y = Math.random() * 1024;
+    g.fillStyle = 'rgba(0,0,0,' + (Math.random() * 0.05) + ')';
+    g.fillRect(x, y, 2, 2);
+  }
+  // Edge vignette baked into the turf
+  var grad = g.createRadialGradient(512, 512, 380, 512, 512, 740);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.35)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 1024, 1024);
   return new THREE.CanvasTexture(c);
 }
 
 function buildPitch() {
   var grass = new THREE.Mesh(
-    new THREE.PlaneGeometry(PW + 16, PH + 16),
-    new THREE.MeshLambertMaterial({ map: stripeTexture() })
+    new THREE.PlaneGeometry(PW + 18, PH + 18),
+    new THREE.MeshLambertMaterial({ map: grassTexture() })
   );
   grass.rotation.x = -Math.PI / 2;
   grass.position.set(PW / 2, 0, PH / 2);
@@ -94,18 +114,22 @@ function buildPitch() {
   var c = document.createElement('canvas');
   c.width = 1050; c.height = 680;
   var g = c.getContext('2d');
-  g.strokeStyle = 'rgba(255,255,255,0.85)';
-  g.fillStyle = 'rgba(255,255,255,0.85)';
+  g.strokeStyle = 'rgba(255,255,255,0.9)';
+  g.fillStyle = 'rgba(255,255,255,0.9)';
   g.lineWidth = 3;
   g.strokeRect(2, 2, 1046, 676);
   g.beginPath(); g.moveTo(525, 2); g.lineTo(525, 678); g.stroke();
   g.beginPath(); g.arc(525, 340, 91.5, 0, Math.PI * 2); g.stroke();
+  g.beginPath(); g.arc(525, 340, 5, 0, Math.PI * 2); g.fill();
   g.strokeRect(2, 138.5, 165, 403);
   g.strokeRect(883, 138.5, 165, 403);
   g.strokeRect(2, 248.5, 55, 183);
   g.strokeRect(993, 248.5, 55, 183);
   g.beginPath(); g.arc(110, 340, 4, 0, Math.PI * 2); g.fill();
   g.beginPath(); g.arc(940, 340, 4, 0, Math.PI * 2); g.fill();
+  // Penalty-box arcs
+  g.beginPath(); g.arc(110, 340, 91.5, -0.93, 0.93); g.stroke();
+  g.beginPath(); g.arc(940, 340, 91.5, Math.PI - 0.93, Math.PI + 0.93); g.stroke();
   var lines = new THREE.Mesh(
     new THREE.PlaneGeometry(PW, PH),
     new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true })
@@ -123,7 +147,7 @@ function netTexture() {
   var c = document.createElement('canvas');
   c.width = 64; c.height = 64;
   var g = c.getContext('2d');
-  g.strokeStyle = 'rgba(255,255,255,0.45)';
+  g.strokeStyle = 'rgba(255,255,255,0.5)';
   g.lineWidth = 1;
   for (var i = 0; i <= 64; i += 8) {
     g.beginPath(); g.moveTo(i, 0); g.lineTo(i, 64); g.stroke();
@@ -135,7 +159,7 @@ function netTexture() {
 }
 
 function buildGoal(atX, dirIn) {
-  var postMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+  var postMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x333333 });
   var p1 = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 2.44, 6), postMat);
   p1.position.set(atX, 1.22, PH / 2 - 3.66);
   var p2 = p1.clone(); p2.position.z = PH / 2 + 3.66;
@@ -174,22 +198,76 @@ function buildFlags() {
   });
 }
 
+function crowdTexture() {
+  var c = document.createElement('canvas');
+  c.width = 512; c.height = 128;
+  var g = c.getContext('2d');
+  g.fillStyle = '#0d1812';
+  g.fillRect(0, 0, 512, 128);
+  var cols = ['#3a4a52', '#5a3d3d', '#3d4a5a', '#52523a', '#443a52', '#6b6b6b', '#2f4a3a'];
+  for (var n = 0; n < 2600; n++) {
+    g.fillStyle = cols[(Math.random() * cols.length) | 0];
+    g.globalAlpha = 0.5 + Math.random() * 0.5;
+    g.fillRect(Math.random() * 512, Math.random() * 128, 2.2, 2.8);
+  }
+  g.globalAlpha = 1;
+  var t = new THREE.CanvasTexture(c);
+  t.wrapS = THREE.RepeatWrapping;
+  return t;
+}
+
 function buildStands() {
-  var standMat = new THREE.MeshLambertMaterial({ color: 0x101f16 });
-  var seatMat = new THREE.MeshLambertMaterial({ color: 0x18301f });
-  function stand(x, z, w, d, rot) {
-    var base = new THREE.Mesh(new THREE.BoxGeometry(w, 6, d), standMat);
-    base.position.set(x, 3, z);
+  var wallMat = new THREE.MeshLambertMaterial({ color: 0x0c1811 });
+  var crowdMat = new THREE.MeshLambertMaterial({ map: crowdTexture() });
+  function stand(x, z, w, rot) {
+    var base = new THREE.Mesh(new THREE.BoxGeometry(w, 4.5, 8), wallMat);
+    base.position.set(x, 2.25, z);
     base.rotation.y = rot;
     scene.add(base);
-    var tier = new THREE.Mesh(new THREE.BoxGeometry(w, 3.5, d * 0.6), seatMat);
-    tier.position.set(x, 7.5, z);
+    // Raked crowd plane facing the pitch
+    var tier = new THREE.Mesh(new THREE.PlaneGeometry(w, 9), crowdMat.clone());
+    tier.material.map.repeat.set(w / 24, 1);
+    tier.position.set(x, 6.5, z);
     tier.rotation.y = rot;
+    tier.rotateX(-0.55);
     scene.add(tier);
   }
-  stand(PW / 2, -12, PW + 24, 9, 0);            // far side
-  stand(-14, PH / 2, PH + 10, 9, Math.PI / 2);  // ends
-  stand(PW + 14, PH / 2, PH + 10, 9, Math.PI / 2);
+  stand(PW / 2, -11, PW + 26, 0);
+  stand(PW / 2, PH + 11 + 44, 0, 0); // unused far-side placeholder kept off-camera
+  stand(-13, PH / 2, PH + 12, Math.PI / 2);
+  stand(PW + 13, PH / 2, PH + 12, -Math.PI / 2);
+}
+
+function glowSprite(color) {
+  var c = document.createElement('canvas');
+  c.width = 64; c.height = 64;
+  var g = c.getContext('2d');
+  var grad = g.createRadialGradient(32, 32, 2, 32, 32, 30);
+  grad.addColorStop(0, 'rgba(255,250,225,0.95)');
+  grad.addColorStop(0.4, 'rgba(255,244,200,0.35)');
+  grad.addColorStop(1, 'rgba(255,244,200,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  var mat = new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), blending: THREE.AdditiveBlending, depthWrite: false });
+  return new THREE.Sprite(mat);
+}
+
+function buildFloodlights() {
+  var poleMat = new THREE.MeshLambertMaterial({ color: 0x222c26 });
+  var headMat = new THREE.MeshBasicMaterial({ color: 0xfff6d8 });
+  [[-8, -6], [-8, PH + 6], [PW + 8, -6], [PW + 8, PH + 6]].forEach(function (p) {
+    var pole = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.5, 22, 6), poleMat);
+    pole.position.set(p[0], 11, p[1]);
+    scene.add(pole);
+    var head = new THREE.Mesh(new THREE.BoxGeometry(4, 1.6, 0.7), headMat);
+    head.position.set(p[0], 22.5, p[1]);
+    head.lookAt(PW / 2, 0, PH / 2);
+    scene.add(head);
+    var glow = glowSprite();
+    glow.scale.set(14, 14, 1);
+    glow.position.set(p[0], 22.5, p[1]);
+    scene.add(glow);
+  });
 }
 
 // -------------------------------------------------------------- actors ----
@@ -209,7 +287,6 @@ function makePlayer(kitCol, shortsCol, idx) {
   var skin = skinTones[idx % skinTones.length];
   var skinMat = new THREE.MeshLambertMaterial({ color: skin });
 
-  // Torso (kit)
   var body = new THREE.Mesh(
     new THREE.CylinderGeometry(0.34, 0.42, 0.75, 8),
     new THREE.MeshLambertMaterial({ color: kitCol })
@@ -217,7 +294,6 @@ function makePlayer(kitCol, shortsCol, idx) {
   body.position.y = 1.05;
   group.add(body);
 
-  // Shorts
   var shorts = new THREE.Mesh(
     new THREE.CylinderGeometry(0.30, 0.34, 0.30, 8),
     new THREE.MeshLambertMaterial({ color: shortsCol })
@@ -225,24 +301,22 @@ function makePlayer(kitCol, shortsCol, idx) {
   shorts.position.y = 0.55;
   group.add(shorts);
 
-  // Legs (animated)
   var legGeo = new THREE.CylinderGeometry(0.10, 0.09, 0.55, 6);
+  legGeo.translate(0, -0.22, 0);
   var legL = new THREE.Mesh(legGeo, skinMat);
   var legR = new THREE.Mesh(legGeo, skinMat);
-  // Pivot at the hip: offset geometry downwards
-  legGeo.translate(0, -0.22, 0);
   legL.position.set(0.13, 0.42, 0);
   legR.position.set(-0.13, 0.42, 0);
   group.add(legL); group.add(legR);
 
-  // Arms (static, slight angle)
   var armGeo = new THREE.CylinderGeometry(0.07, 0.06, 0.55, 6);
+  armGeo.translate(0, -0.2, 0);
   var armL = new THREE.Mesh(armGeo, new THREE.MeshLambertMaterial({ color: kitCol }));
-  armL.position.set(0.42, 1.05, 0); armL.rotation.z = 0.25;
-  var armR = armL.clone(); armR.position.x = -0.42; armR.rotation.z = -0.25;
+  var armR = new THREE.Mesh(armGeo, new THREE.MeshLambertMaterial({ color: kitCol }));
+  armL.position.set(0.40, 1.35, 0); armL.rotation.z = 0.22;
+  armR.position.set(-0.40, 1.35, 0); armR.rotation.z = -0.22;
   group.add(armL); group.add(armR);
 
-  // Head + hair
   var head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 8, 8), skinMat);
   head.position.y = 1.65;
   group.add(head);
@@ -256,17 +330,35 @@ function makePlayer(kitCol, shortsCol, idx) {
   var shadow = blobShadow(0.5);
   scene.add(shadow);
   scene.add(group);
-  return { group: group, legL: legL, legR: legR, shadow: shadow, runPhase: Math.random() * 6.28, px: 0, pz: 0, faceAngle: 0 };
+  return { group: group, legL: legL, legR: legR, armL: armL, armR: armR, shadow: shadow,
+           runPhase: Math.random() * 6.28, px: 0, pz: 0, faceAngle: 0 };
 }
 
 function buildBall() {
   ball = new THREE.Mesh(
     new THREE.SphereGeometry(0.24, 12, 12),
-    new THREE.MeshLambertMaterial({ color: 0xffffff })
+    new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x222222 })
   );
   scene.add(ball);
   ballShadow = blobShadow(0.24);
   scene.add(ballShadow);
+}
+
+function buildTrail() {
+  for (var i = 0; i < TRAIL_N; i++) {
+    var m = new THREE.Mesh(
+      new THREE.SphereGeometry(0.16, 6, 6),
+      new THREE.MeshBasicMaterial({
+        color: 0xF4FFD0,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+      })
+    );
+    scene.add(m);
+    trail.push(m);
+  }
 }
 
 // ----------------------------------------------------- data + playback ----
@@ -285,9 +377,23 @@ function angLerp(a, b, t) {
   return a + d * t;
 }
 
-var camX = 52.5, lookX = 52.5, lookZ = 34;
+function ballAt(f) {
+  f = Math.max(0, Math.min(f, frames.length - 1.001));
+  var i0 = Math.floor(f), i1 = Math.min(i0 + 1, frames.length - 1), t = f - i0;
+  return [lerp(frames[i0][0], frames[i1][0], t),
+          lerp(frames[i0][1], frames[i1][1], t),
+          lerp(frames[i0][2], frames[i1][2], t)];
+}
 
-function sf(f) {   // set fractional frame
+var camX = 52.5, lookX = 52.5, lookZ = 34, curFov = 36;
+var goalCamT = 0, goalCamSide = 1;
+
+function goalCam() {
+  goalCamT = 85;                         // ~2.8s of sf() calls
+  goalCamSide = (ball.position.x > PW / 2) ? 1 : -1;
+}
+
+function sf(f) {
   if (frames.length === 0) return;
   f = Math.max(0, Math.min(f, frames.length - 1.001));
   var i0 = Math.floor(f);
@@ -296,10 +402,26 @@ function sf(f) {   // set fractional frame
   var A = frames[i0], B = frames[i1];
 
   var bx = lerp(A[0], B[0], t), by = lerp(A[1], B[1], t), bz = lerp(A[2], B[2], t);
+  var pb = ballAt(f - 0.4);
+  var ballSpeed = Math.sqrt((bx - pb[0]) * (bx - pb[0]) + (by - pb[1]) * (by - pb[1]));
+
   ball.position.set(bx, 0.24 + bz, by);
-  ball.rotation.x += 0.25; // rolling spin
+  ball.rotation.x += 0.08 + ballSpeed * 0.06;
   ballShadow.position.set(bx, 0.03, by);
-  ballShadow.material.opacity = Math.max(0.06, 0.28 - bz * 0.045);
+  ballShadow.material.opacity = Math.max(0.06, 0.28 - bz * 0.04);
+  var shScale = 1 + bz * 0.35;
+  ballShadow.scale.set(shScale, shScale, 1);
+
+  // Comet trail: bright and long when the ball is fast or airborne
+  var vis = Math.min(1, ballSpeed * 0.55 + bz * 0.35);
+  for (var k = 0; k < TRAIL_N; k++) {
+    var tb = ballAt(f - 0.28 * (k + 1));
+    var tm = trail[k];
+    tm.position.set(tb[0], 0.24 + tb[2], tb[1]);
+    tm.material.opacity = vis * 0.5 * (1 - k / TRAIL_N);
+    var s = 1 - 0.6 * k / TRAIL_N;
+    tm.scale.set(s, s, s);
+  }
 
   for (var p = 0; p < 22; p++) {
     var px = lerp(A[3 + p * 2], B[3 + p * 2], t);
@@ -308,20 +430,18 @@ function sf(f) {   // set fractional frame
     var dx = px - pl.px, dz = pz - pl.pz;
     var sp = Math.sqrt(dx * dx + dz * dz);
 
-    // Face direction of travel, turning smoothly
     if (sp > 0.005) {
       pl.faceAngle = angLerp(pl.faceAngle, Math.atan2(dx, dz), 0.25);
     }
     pl.group.rotation.y = pl.faceAngle;
-    // Lean into the run
     pl.group.rotation.x = Math.min(sp * 1.4, 0.22);
 
-    // Leg swing scaled by speed
     pl.runPhase += sp * 4.5;
-    var swing = Math.min(sp * 5.0, 0.75);
+    var swing = Math.min(sp * 5.0, 0.8);
     pl.legL.rotation.x = Math.sin(pl.runPhase) * swing;
     pl.legR.rotation.x = -Math.sin(pl.runPhase) * swing;
-    // Bob
+    pl.armL.rotation.x = -Math.sin(pl.runPhase) * swing * 0.6;
+    pl.armR.rotation.x = Math.sin(pl.runPhase) * swing * 0.6;
     var bob = Math.abs(Math.sin(pl.runPhase)) * Math.min(sp * 0.5, 0.06);
 
     pl.group.position.set(px, bob, pz);
@@ -329,13 +449,34 @@ function sf(f) {   // set fractional frame
     pl.px = px; pl.pz = pz;
   }
 
-  // Smooth TV camera: eased position and eased look-target, both clamped
-  camX += (bx - camX) * 0.035;
-  camX = Math.max(20, Math.min(PW - 20, camX));
-  lookX += (bx - lookX) * 0.07;
-  lookZ += (by - lookZ) * 0.07;
-  camera.position.set(camX, 30, PH + 40);
-  camera.lookAt(lookX, 0.5, lookZ * 0.6 + PH * 0.2);
+  // ---- camera ----
+  var targetFov = 36;
+  if (goalCamT > 0) {
+    goalCamT--;
+    // Swoop low behind play towards the scoring end, then ease back
+    var gx = goalCamSide > 0 ? PW - 18 : 18;
+    var strength = Math.min(1, (85 - goalCamT) / 18) * Math.min(1, goalCamT / 18);
+    camX += ((gx - camX) * 0.10) * strength + (bx - camX) * 0.02;
+    var camY = 30 - 17 * strength;
+    var camZ = (PH + 40) - 22 * strength;
+    lookX += (bx - lookX) * 0.12;
+    lookZ += (by - lookZ) * 0.12;
+    camera.position.set(camX, camY, camZ);
+    camera.lookAt(lookX, 1.0, lookZ * 0.75 + PH * 0.125);
+    targetFov = 30;
+  } else {
+    camX += (bx - camX) * 0.035;
+    camX = Math.max(20, Math.min(PW - 20, camX));
+    lookX += (bx - lookX) * 0.07;
+    lookZ += (by - lookZ) * 0.07;
+    camera.position.set(camX, 30, PH + 40);
+    camera.lookAt(lookX, 0.5, lookZ * 0.6 + PH * 0.2);
+    // Gentle zoom when play reaches either box
+    if (Math.abs(bx - PW / 2) > 33) targetFov = 32.5;
+  }
+  curFov += (targetFov - curFov) * 0.05;
+  camera.fov = curFov;
+  camera.updateProjectionMatrix();
 
   renderer.render(scene, camera);
 }

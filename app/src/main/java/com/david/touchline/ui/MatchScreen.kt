@@ -21,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontStyle
@@ -87,6 +88,7 @@ fun MatchScreen(vm: GameViewModel) {
     LaunchedEffect(goalCount) {
         if (goalCount > 0 && !finished) {
             goalSplash = match.events.lastOrNull { it.type == EventType.GOAL && it.tick <= currentTick }
+            if (mode3d && webReady) webViewRef?.evaluateJavascript("goalCam()", null)
             delay(2800)
             goalSplash = null
         }
@@ -150,8 +152,16 @@ fun MatchScreen(vm: GameViewModel) {
                     val lerped = remember(f) {
                         FloatArray(a.size) { idx -> a[idx] + (b[idx] - a[idx]) * t }
                     }
+                    // Recent ball positions for the comet trail
+                    val trail = remember(f) {
+                        (1..8).mapNotNull { k ->
+                            val idx = (f - k * 0.9f).toInt()
+                            if (idx >= 0) frames[idx] else null
+                        }.map { Triple(it[0], it[1], it[2]) }
+                    }
                     PitchCanvas(
                         frame = lerped,
+                        trail = trail,
                         homeColor = Color(home.colorPrimary),
                         awayColor = Color(away.colorPrimary),
                         modifier = pitchModifier
@@ -357,7 +367,13 @@ private fun StatCol(label: String, homeVal: String, awayVal: String) {
 // ---------------------------------------------------------------- 2D view ----
 
 @Composable
-fun PitchCanvas(frame: FloatArray, homeColor: Color, awayColor: Color, modifier: Modifier) {
+fun PitchCanvas(
+    frame: FloatArray,
+    trail: List<Triple<Float, Float, Float>> = emptyList(),
+    homeColor: Color,
+    awayColor: Color,
+    modifier: Modifier
+) {
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
@@ -405,11 +421,31 @@ fun PitchCanvas(frame: FloatArray, homeColor: Color, awayColor: Color, modifier:
             drawCircle(Color.White.copy(alpha = 0.8f), radius = r, center = Offset(x, y), style = Stroke(1.5f))
         }
 
+        // Comet trail behind a moving or airborne ball
+        trail.forEachIndexed { k, (tx, ty2, tz) ->
+            val fade = (1f - k / 9f)
+            drawCircle(
+                Color(0xFFF4FFD0).copy(alpha = 0.28f * fade),
+                radius = 2.6.dp.toPx() * fade * (1f + tz * 0.1f),
+                center = Offset(px(tx), py(ty2))
+            )
+        }
+
         val bx = px(frame[0])
         val by = py(frame[1])
         val bz = frame[2]
         val ballR = 3.dp.toPx() * 0.8f * (1f + bz * 0.18f)
         drawCircle(Color.Black.copy(alpha = (0.4f - bz * 0.05f).coerceAtLeast(0.1f)), radius = ballR, center = Offset(bx, by + 1f + px(bz * 0.6f)))
         drawCircle(Color.White, radius = ballR, center = Offset(bx, by))
+
+        // Cinematic vignette
+        drawRect(
+            brush = Brush.radialGradient(
+                colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.32f)),
+                center = Offset(w / 2, h / 2),
+                radius = w * 0.62f
+            ),
+            size = size
+        )
     }
 }

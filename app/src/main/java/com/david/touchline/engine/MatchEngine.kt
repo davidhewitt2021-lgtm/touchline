@@ -54,6 +54,8 @@ private class SimPlayer(
     var anchorY: Double,
     var x: Double,
     var y: Double,
+    var prevX: Double = x,
+    var prevY: Double = y,
     val pullVar: Double,
     val wobblePhase: Double
 ) {
@@ -90,6 +92,16 @@ class MatchEngine(
     private var flightHeight = 0.0
     private var pendingReceiver: SimPlayer? = null
     private var headerOnArrival = false
+
+    /** A shot in flight whose outcome resolves when the ball arrives. */
+    private class PendingShot(
+        val shooter: SimPlayer,
+        val outcome: Int,            // 0 = goal, 1 = saved, 2 = off target
+        val how: String,             // "", " with a header", " from the penalty spot", ...
+        val penalty: Boolean,
+        val cornerFollows: Boolean
+    )
+    private var pendingShot: PendingShot? = null
 
     // Set pieces
     private var phase = Phase.OPEN
@@ -257,6 +269,8 @@ class MatchEngine(
     private fun movePlayers() {
         val o = owner
         for (sp in players) {
+            sp.prevX = sp.x
+            sp.prevY = sp.y
             var tx: Double
             var ty: Double
             when {
@@ -309,7 +323,19 @@ class MatchEngine(
             ty = ty.coerceIn(0.5, PITCH_H - 0.5)
             stepTowards(sp, tx, ty, if (sp === o) sp.speed * 0.75 else sp.speed)
         }
-        owner?.let { ballX = it.x; ballY = it.y; ballZ = 0.0 }
+        owner?.let {
+            // Ball pushed a touch ahead of the dribbler, in the direction of travel
+            val dx = it.x - it.prevX
+            val dy = it.y - it.prevY
+            val d = hypot(dx, dy)
+            if (d > 0.05) {
+                ballX = (it.x + dx / d * 0.9).coerceIn(0.0, PITCH_W)
+                ballY = (it.y + dy / d * 0.9).coerceIn(0.0, PITCH_H)
+            } else {
+                ballX = it.x; ballY = it.y
+            }
+            ballZ = 0.0
+        }
     }
 
     private fun stepTowards(sp: SimPlayer, tx: Double, ty: Double, step: Double) {
@@ -346,6 +372,11 @@ class MatchEngine(
         ballZ = 4.0 * flightHeight * progress * (1 - progress)
         if (flightTicks <= 0) {
             ballZ = 0.0
+            pendingShot?.let { shot ->
+                pendingShot = null
+                resolveShot(shot)
+                return
+            }
             val recv = pendingReceiver
             val header = headerOnArrival
             pendingReceiver = null
@@ -395,8 +426,8 @@ class MatchEngine(
             val def = tackler.player.attr.defending.toDouble()
             val dri = c.player.attr.dribbling.toDouble()
             if (rng.nextDouble() < def / (def + dri) * 0.22) {
-                if (rng.nextDouble() < 0.12) {
-                    if (rng.nextDouble() < 0.30) {
+                if (rng.nextDouble() < 0.065) {
+                    if (rng.nextDouble() < 0.25) {
                         addEvent(EventType.CARD, tackler, "${tackler.player.name} is booked for the foul")
                     }
                     awardFreeKickOrPenalty(c)
@@ -417,17 +448,24 @@ class MatchEngine(
             }
         }
 
-        if (distGoal < 28.0 && !wide) {
+        if (distGoal < 30.0 && !wide) {
             val homeBoost = if (c.home) 1.08 else 1.0
-            val shootProb = ((30.0 - distGoal) / 30.0) * 0.045 * mFactor * homeBoost *
+            var shootProb = ((32.0 - distGoal) / 32.0) * 0.038 * mFactor * homeBoost *
                 (0.6 + c.player.attr.shooting / 200.0) / (1.0 + pressure * 0.6)
+            // Willingness to have a go from range, scaled by shooting ability
+            if (distGoal > 17.0) {
+                shootProb += 0.004 * mFactor * (c.player.attr.shooting / 85.0)
+            }
             if (rng.nextDouble() < shootProb) {
+                if (distGoal > 20.0) {
+                    addEvent(EventType.CHANCE, c, "${c.player.name} lets fly from distance!")
+                }
                 attemptShot(c)
                 return
             }
         }
 
-        val basePassProb = 0.22 + pressure * 0.15
+        val basePassProb = 0.16 + pressure * 0.15
         if (rng.nextDouble() < basePassProb) passBall(c)
     }
 
@@ -515,37 +553,72 @@ class MatchEngine(
             else -> {
                 goalProb = (shootSkill / (shootSkill + kp * 1.35)) * (1.05 - distGoal / 34.0)
                 if (pressure > 0) goalProb *= 0.55
-                if (headed) goalProb *= 0.50
-                goalProb = goalProb.coerceIn(0.02, 0.42)
+                if (headed) goalProb *= 0.40
+                goalProb = goalProb.coerceIn(0.02, 0.38)
                 onTarget = rng.nextDouble() < 0.55 + shootSkill / 400.0
             }
         }
 
+        val outcome: Int
         if (onTarget) {
             if (c.home) result.stats.homeOnTarget++ else result.stats.awayOnTarget++
-            if (rng.nextDouble() < goalProb) {
+            outcome = if (rng.nextDouble() < goalProb) 0 else 1
+        } else {
+            outcome = 2
+        }
+        val how = when {
+            penalty -> " from the penalty spot"
+            freeKick -> " direct from the free kick"
+            headed -> " with a header"
+            distGoal > 20.0 -> " from distance"
+            else -> ""
+        }
+        val cornerFollows = !penalty && rng.nextDouble() < (if (outcome == 1) 0.28 else 0.12)
+        pendingShot = PendingShot(c, outcome, how, penalty, cornerFollows)
+
+        // The ball visibly travels goalwards; the outcome lands with it
+        val speed = if (headed) 14.0 else 22.0
+        val (ty, th) = when (outcome) {
+            0 -> (PITCH_H / 2 + rng.nextDouble(-3.2, 3.2)) to rng.nextDouble(0.1, 1.3)
+            1 -> (PITCH_H / 2 + rng.nextDouble(-2.8, 2.8)) to rng.nextDouble(0.0, 0.9)
+            else -> {
+                val side = if (rng.nextBoolean()) 1 else -1
+                (PITCH_H / 2 + side * rng.nextDouble(4.6, 9.0)) to rng.nextDouble(0.2, 2.4)
+            }
+        }
+        startFlight(goalX, ty, speed, null, height = th)
+    }
+
+    private fun resolveShot(shot: PendingShot) {
+        val c = shot.shooter
+        val keeper = keeperOf(!c.home)
+        when (shot.outcome) {
+            0 -> {
                 if (c.home) result.homeGoals++ else result.awayGoals++
                 c.player.seasonGoals++
-                val how = when {
-                    penalty -> " from the penalty spot"
-                    freeKick -> " direct from the free kick"
-                    headed -> " with a header"
-                    else -> ""
+                val roar = when (rng.nextInt(3)) {
+                    0 -> "GOAL! ${c.player.name} scores${shot.how} for ${teamOf(c.home).name}!"
+                    1 -> "IT'S IN! ${c.player.name} finds the net${shot.how}!"
+                    else -> "GOAL! A brilliant finish${shot.how} by ${c.player.name}!"
                 }
-                addEvent(EventType.GOAL, c, "GOAL! ${c.player.name} scores$how for ${teamOf(c.home).name}!")
-                startFlight(goalX, PITCH_H / 2, 20.0, null, height = 0.5)
+                addEvent(EventType.GOAL, c, roar)
                 pendingKickoffToHome = !c.home
-                return
+                // Leave the ball in the net briefly; kickoff follows
+                flightTicks = 2; flightTotal = 2; flightDX = 0.0; flightDY = 0.0; flightHeight = 0.0
             }
-            addEvent(EventType.SAVE, c, "${keeper.player.name} saves from ${c.player.name}")
-            if (!penalty && rng.nextDouble() < 0.28) {
-                awardCorner(c.home)
-            } else {
-                giveGoalKick(keeper)
+            1 -> {
+                val saveTxt = when (rng.nextInt(3)) {
+                    0 -> "${keeper.player.name} saves from ${c.player.name}"
+                    1 -> "Great stop! ${keeper.player.name} denies ${c.player.name}"
+                    else -> "${keeper.player.name} gets down well to keep out ${c.player.name}"
+                }
+                addEvent(EventType.SAVE, c, saveTxt)
+                if (shot.cornerFollows) awardCorner(c.home) else giveGoalKick(keeper)
             }
-        } else {
-            addEvent(EventType.CHANCE, c, if (headed) "${c.player.name} heads it over" else "${c.player.name} shoots wide")
-            if (!penalty && rng.nextDouble() < 0.12) awardCorner(c.home) else giveGoalKick(keeper)
+            else -> {
+                addEvent(EventType.CHANCE, c, if (shot.how.contains("header")) "${c.player.name} heads it over" else "${c.player.name} shoots wide")
+                if (shot.cornerFollows) awardCorner(c.home) else giveGoalKick(keeper)
+            }
         }
     }
 
@@ -559,7 +632,7 @@ class MatchEngine(
 
     private fun awardFreeKickOrPenalty(fouled: SimPlayer) {
         spHome = fouled.home
-        if (inAttackedBox(fouled.x, fouled.y, fouled.home) && rng.nextDouble() < 0.35) {
+        if (inAttackedBox(fouled.x, fouled.y, fouled.home) && rng.nextDouble() < 0.30) {
             setPiece = SetPiece.PENALTY
             spX = if (fouled.home) PITCH_W - 11.0 else 11.0
             spY = PITCH_H / 2
