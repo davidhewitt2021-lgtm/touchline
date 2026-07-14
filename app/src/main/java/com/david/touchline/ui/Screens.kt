@@ -42,12 +42,7 @@ fun HomeScreen(vm: GameViewModel) {
         item {
             Card(colors = CardDefaults.cardColors(containerColor = PanelGreen), shape = RoundedCornerShape(14.dp)) {
                 Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        Modifier.size(46.dp).clip(CircleShape).background(Color(user.colorPrimary)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(user.short, color = Color(user.colorSecondary), fontWeight = FontWeight.Black, fontSize = 13.sp)
-                    }
+                    Crest(user, 46.dp)
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
                         Text(user.name, fontSize = 19.sp, fontWeight = FontWeight.Black)
@@ -71,7 +66,7 @@ fun HomeScreen(vm: GameViewModel) {
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Budget £${user.budget / 1000}k · Wages £${wageBill / 1000}k/wk",
+                        "Budget ${money(user.budget)} · Wages ${money(wageBill)}/wk",
                         color = if (user.budget < 0) Color(0xFFEF5350) else MutedGrass, fontSize = 12.sp
                     )
                 }
@@ -129,9 +124,20 @@ fun HomeScreen(vm: GameViewModel) {
         }
 
         item { SectionLabel("INBOX") }
-        items(s.inbox.takeLast(8).reversed()) { msg ->
-            Card(colors = CardDefaults.cardColors(containerColor = PanelGreen), shape = RoundedCornerShape(10.dp)) {
-                Text(msg, Modifier.fillMaxWidth().padding(12.dp), fontSize = 13.sp)
+        items(s.inbox.takeLast(10).reversed()) { msg ->
+            var expanded by remember(msg) { mutableStateOf(false) }
+            Card(
+                colors = CardDefaults.cardColors(containerColor = PanelGreen),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.clickable { expanded = !expanded }
+            ) {
+                Text(
+                    msg,
+                    Modifier.fillMaxWidth().padding(12.dp),
+                    fontSize = 13.sp,
+                    maxLines = if (expanded) Int.MAX_VALUE else 2,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
 
@@ -215,8 +221,7 @@ fun SquadScreen(vm: GameViewModel) {
 
     LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item {
-            Text("Squad", fontSize = 22.sp, fontWeight = FontWeight.Black)
-            Text("${squad.size} players · tap for details", color = MutedGrass, fontSize = 12.sp)
+            HeroHeader(Tab.SQUAD, "Squad", "${squad.size} players · tap for details")
             Spacer(Modifier.height(6.dp))
         }
         items(squad) { p ->
@@ -325,7 +330,7 @@ fun PlayerDetailDialog(vm: GameViewModel, playerId: Int) {
                 if (p.position == Position.GK) AttrBar("Keeping", p.attr.keeping)
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Overall ${p.overall} · Form ${"%.1f".format(p.form)} · £${p.wage}/wk\nValue £${p.value / 1000}k · Morale ${p.morale} · ${p.seasonYellows} yellow(s)",
+                    "Overall ${p.overall} · Form ${"%.1f".format(p.form)} · £${p.wage}/wk\nValue ${money(p.value)} · Morale ${p.morale} · ${p.seasonYellows} yellow(s)",
                     fontSize = 12.sp, color = MutedGrass
                 )
                 message?.let {
@@ -377,7 +382,7 @@ fun TacticsScreen(vm: GameViewModel) {
     var slotDialogFor by remember { mutableStateOf<Int?>(null) }   // player id
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Text("Tactics", fontSize = 22.sp, fontWeight = FontWeight.Black)
+        HeroHeader(Tab.TACTICS, "Tactics", "${tactics.formation.label} · drag the shape of your side")
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Formation.entries.forEach { f ->
@@ -548,7 +553,7 @@ fun LeagueScreen(vm: GameViewModel) {
 
     LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         item {
-            Text("League", fontSize = 22.sp, fontWeight = FontWeight.Black)
+            HeroHeader(Tab.LEAGUE, "League", "Season ${s.season} · Round ${s.round}/${s.totalRounds}")
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                 Text("#", color = MutedGrass, fontSize = 11.sp, modifier = Modifier.width(24.dp))
@@ -570,6 +575,8 @@ fun LeagueScreen(vm: GameViewModel) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("${idx + 1}", fontSize = 13.sp, color = if (idx == 0) TouchLime else ChalkWhite, modifier = Modifier.width(24.dp))
+                Crest(team, 20.dp, showText = false)
+                Spacer(Modifier.width(6.dp))
                 Text(team.name, fontSize = 13.sp, fontWeight = if (mine) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.weight(1f))
                 Text("${row.played}", fontSize = 13.sp, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
                 Text("${row.gd}", fontSize = 13.sp, modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
@@ -604,15 +611,14 @@ fun TransfersScreen(vm: GameViewModel) {
 
     LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item {
-            Text("Transfer market", fontSize = 22.sp, fontWeight = FontWeight.Black)
-            Text("Budget £${s.userTeam().budget / 1000}k · tap a player to buy", color = MutedGrass, fontSize = 12.sp)
+            HeroHeader(Tab.TRANSFERS, "Market", "Budget ${money(s.userTeam().budget)} · tap a player to buy")
             Spacer(Modifier.height(6.dp))
         }
         if (listed.isEmpty()) {
             item { Text("Nobody is listed right now. The market refreshes each season.", color = MutedGrass, fontSize = 13.sp) }
         }
         items(listed) { p ->
-            PlayerRow(p, trailing = "£${p.value / 1000}k") { vm.detailPlayerId = p.id }
+            PlayerRow(p, trailing = money(p.value)) { vm.detailPlayerId = p.id }
         }
     }
 }

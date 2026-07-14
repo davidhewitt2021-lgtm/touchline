@@ -41,10 +41,10 @@ private val LineWhite = Color(0xCCFFFFFF)
 
 /**
  * Playback speed: at 1x the clock advances 5 sim frames per real second
- * (each frame is 2s of match time), i.e. 10 match-seconds per second — a
- * full 90 minutes plays out in nine minutes. 8x skims it in ~70 seconds.
+ * (each frame is 2s of match time), i.e. ~7 match-seconds per second — a
+ * full 90 minutes plays out in ~12.5 minutes. 8x skims it in ~95 seconds.
  */
-private const val FRAMES_PER_SEC_1X = 5.0f
+private const val FRAMES_PER_SEC_1X = 3.6f
 
 @Composable
 fun MatchScreen(vm: GameViewModel) {
@@ -104,7 +104,7 @@ fun MatchScreen(vm: GameViewModel) {
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            KitDot(Color(home.colorPrimary))
+            Crest(home, 26.dp, showText = false)
             Spacer(Modifier.width(8.dp))
             Text(home.short, fontWeight = FontWeight.Black, fontSize = 18.sp)
             Spacer(Modifier.weight(1f))
@@ -112,7 +112,7 @@ fun MatchScreen(vm: GameViewModel) {
             Spacer(Modifier.weight(1f))
             Text(away.short, fontWeight = FontWeight.Black, fontSize = 18.sp)
             Spacer(Modifier.width(8.dp))
-            KitDot(Color(away.colorPrimary))
+            Crest(away, 26.dp, showText = false)
         }
         Row(
             Modifier.fillMaxWidth().padding(vertical = 4.dp),
