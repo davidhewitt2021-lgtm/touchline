@@ -29,8 +29,19 @@ data class Player(
     var morale: Int = 70,
     var seasonGoals: Int = 0,
     var seasonApps: Int = 0,
-    var transferListed: Boolean = false
+    var transferListed: Boolean = false,
+    /** Rolling average match rating (CM-style form). */
+    var form: Double = 6.5,
+    var injuryWeeks: Int = 0,
+    var banMatches: Int = 0,
+    var seasonYellows: Int = 0,
+    var seasonRatingSum: Double = 0.0
 ) {
+    /** Weekly wage in pounds, driven by ability. */
+    val wage: Int get() = (overall * overall) / 6 + 150
+
+    val available: Boolean get() = injuryWeeks == 0 && banMatches == 0
+
     val overall: Int
         get() = when (position) {
             Position.GK -> (attr.keeping * 5 + attr.physical + attr.passing) / 7
@@ -161,7 +172,7 @@ fun leagueTable(state: GameState): List<TableRow> {
 
 /** Picks the best available XI for a team's formation. Returns player ids: GK, DFs, MFs, FWs. */
 fun autoPickXI(state: GameState, teamId: Int): MutableList<Int> {
-    val squad = state.squad(teamId).sortedByDescending { it.overall }
+    val squad = state.squad(teamId).filter { it.available }.sortedByDescending { it.overall }
     val f = state.team(teamId).tactics.formation
     val xi = mutableListOf<Int>()
     fun take(pos: Position, n: Int) {
@@ -177,4 +188,17 @@ fun autoPickXI(state: GameState, teamId: Int): MutableList<Int> {
         if (p.id !in xi && p.position != Position.GK) xi.add(p.id)
     }
     return xi
+}
+
+/**
+ * Board confidence 0-100: compares actual league position against the
+ * position the club's reputation says it should occupy.
+ */
+fun boardConfidence(state: GameState): Int {
+    val table = leagueTable(state)
+    if (table.first().played == 0) return 60
+    val actual = table.indexOfFirst { it.teamId == state.userTeamId } + 1
+    val expected = state.teams.sortedByDescending { it.reputation }
+        .indexOfFirst { it.id == state.userTeamId } + 1
+    return (55 + (expected - actual) * 7).coerceIn(5, 98)
 }

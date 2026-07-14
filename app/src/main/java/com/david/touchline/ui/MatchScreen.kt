@@ -3,6 +3,10 @@ package com.david.touchline.ui
 import android.annotation.SuppressLint
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -19,11 +23,13 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.david.touchline.engine.EventType
+import com.david.touchline.engine.MatchEvent
 import com.david.touchline.engine.PITCH_H
 import com.david.touchline.engine.PITCH_W
 import kotlinx.coroutines.delay
@@ -33,11 +39,11 @@ private val GrassLight = Color(0xFF1A6437)
 private val LineWhite = Color(0xCCFFFFFF)
 
 /**
- * Playback speed: at 1x the clock advances 7.5 sim frames per real second
- * (each frame is 2s of match time), i.e. 15 match-seconds per second — a
- * full 90 minutes plays out in six minutes. 8x skims it in 45 seconds.
+ * Playback speed: at 1x the clock advances 5 sim frames per real second
+ * (each frame is 2s of match time), i.e. 10 match-seconds per second — a
+ * full 90 minutes plays out in nine minutes. 8x skims it in ~70 seconds.
  */
-private const val FRAMES_PER_SEC_1X = 7.5f
+private const val FRAMES_PER_SEC_1X = 5.0f
 
 @Composable
 fun MatchScreen(vm: GameViewModel) {
@@ -54,6 +60,7 @@ fun MatchScreen(vm: GameViewModel) {
     var mode3d by remember { mutableStateOf(false) }
     var webReady by remember { mutableStateOf(false) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var goalSplash by remember { mutableStateOf<MatchEvent?>(null) }
 
     LaunchedEffect(playing, speed) {
         while (playing && frameFloat < lastFrame) {
@@ -75,6 +82,15 @@ fun MatchScreen(vm: GameViewModel) {
     val awayGoals = match.events.count { it.type == EventType.GOAL && it.teamId == match.awayId && it.tick <= currentTick }
     val visibleEvents = match.events.filter { it.tick <= currentTick && it.type != EventType.CHANCE }
     val finished = frameFloat >= lastFrame
+
+    val goalCount = homeGoals + awayGoals
+    LaunchedEffect(goalCount) {
+        if (goalCount > 0 && !finished) {
+            goalSplash = match.events.lastOrNull { it.type == EventType.GOAL && it.tick <= currentTick }
+            delay(2800)
+            goalSplash = null
+        }
+    }
 
     Column(Modifier.fillMaxSize().padding(12.dp)) {
 
@@ -114,31 +130,68 @@ fun MatchScreen(vm: GameViewModel) {
                 .fillMaxWidth()
                 .aspectRatio(if (mode3d) 1.35f else (PITCH_W / PITCH_H).toFloat())
                 .clip(RoundedCornerShape(10.dp))
-            if (mode3d) {
-                Match3DView(
-                    frames = frames,
-                    homePrimary = home.colorPrimary, homeSecondary = home.colorSecondary,
-                    awayPrimary = away.colorPrimary, awaySecondary = away.colorSecondary,
-                    onReady = { wv -> webViewRef = wv; webReady = true },
-                    modifier = pitchModifier
-                )
-            } else {
-                // Interpolate between the two neighbouring frames for smooth 2D motion
-                val f = frameFloat.coerceIn(0f, lastFrame.toFloat())
-                val i0 = f.toInt()
-                val i1 = (i0 + 1).coerceAtMost(lastFrame)
-                val t = f - i0
-                val a = frames[i0]
-                val b = frames[i1]
-                val lerped = remember(f) {
-                    FloatArray(a.size) { idx -> a[idx] + (b[idx] - a[idx]) * t }
+            Box {
+                if (mode3d) {
+                    Match3DView(
+                        frames = frames,
+                        homePrimary = home.colorPrimary, homeSecondary = home.colorSecondary,
+                        awayPrimary = away.colorPrimary, awaySecondary = away.colorSecondary,
+                        onReady = { wv -> webViewRef = wv; webReady = true },
+                        modifier = pitchModifier
+                    )
+                } else {
+                    // Interpolate between the two neighbouring frames for smooth 2D motion
+                    val f = frameFloat.coerceIn(0f, lastFrame.toFloat())
+                    val i0 = f.toInt()
+                    val i1 = (i0 + 1).coerceAtMost(lastFrame)
+                    val t = f - i0
+                    val a = frames[i0]
+                    val b = frames[i1]
+                    val lerped = remember(f) {
+                        FloatArray(a.size) { idx -> a[idx] + (b[idx] - a[idx]) * t }
+                    }
+                    PitchCanvas(
+                        frame = lerped,
+                        homeColor = Color(home.colorPrimary),
+                        awayColor = Color(away.colorPrimary),
+                        modifier = pitchModifier
+                    )
                 }
-                PitchCanvas(
-                    frame = lerped,
-                    homeColor = Color(home.colorPrimary),
-                    awayColor = Color(away.colorPrimary),
-                    modifier = pitchModifier
-                )
+
+                // GOAL splash
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = goalSplash != null,
+                    enter = scaleIn(initialScale = 0.5f) + fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier.matchParentSize()
+                ) {
+                    val e = goalSplash
+                    val scorer = e?.let { s.player(it.playerId)?.name } ?: ""
+                    val teamColor = if (e?.teamId == match.homeId) Color(home.colorPrimary) else Color(away.colorPrimary)
+                    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                "GOAL!",
+                                color = TouchLime,
+                                fontSize = 46.sp,
+                                fontWeight = FontWeight.Black,
+                                fontStyle = FontStyle.Italic,
+                                letterSpacing = 3.sp
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.size(10.dp).clip(RoundedCornerShape(50)).background(teamColor))
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "$scorer  ${e?.minute ?: 0}'",
+                                    color = ChalkWhite,
+                                    fontSize = 17.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
 

@@ -143,7 +143,9 @@ class MatchEngine(
     private fun resolveXI(team: Team): List<Player> {
         var ids = team.tactics.startingXI
         val squadIds = state.squad(team.id).map { it.id }.toSet()
-        if (ids.size != 11 || !ids.all { it in squadIds }) {
+        val invalid = ids.size != 11 || !ids.all { it in squadIds } ||
+            ids.any { state.player(it)?.available == false }
+        if (invalid) {
             ids = autoPickXI(state, team.id)
             team.tactics.startingXI = ids
         }

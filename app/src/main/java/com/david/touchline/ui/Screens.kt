@@ -1,6 +1,8 @@
 package com.david.touchline.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -12,9 +14,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.david.touchline.engine.*
@@ -28,28 +34,62 @@ fun HomeScreen(vm: GameViewModel) {
     val fixture = Season.userFixture(s)
     val table = leagueTable(s)
     val pos = table.indexOfFirst { it.teamId == user.id } + 1
+    val confidence = boardConfidence(s)
+    val wageBill = s.squad(user.id).sumOf { it.wage }
 
     LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        // Club header
         item {
-            Column {
-                Text(user.name, fontSize = 24.sp, fontWeight = FontWeight.Black)
-                Text(
-                    "Season ${s.season} · Round ${s.round}/${s.totalRounds} · ${ordinalText(pos)} in the league · Budget £${user.budget / 1000}k",
-                    color = MutedGrass, fontSize = 13.sp
-                )
+            Card(colors = CardDefaults.cardColors(containerColor = PanelGreen), shape = RoundedCornerShape(14.dp)) {
+                Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier.size(46.dp).clip(CircleShape).background(Color(user.colorPrimary)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(user.short, color = Color(user.colorSecondary), fontWeight = FontWeight.Black, fontSize = 13.sp)
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(user.name, fontSize = 19.sp, fontWeight = FontWeight.Black)
+                        Text(
+                            "Season ${s.season} · Round ${s.round}/${s.totalRounds} · ${ordinalText(pos)}",
+                            color = MutedGrass, fontSize = 12.sp
+                        )
+                    }
+                }
+                Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 14.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Board confidence", color = MutedGrass, fontSize = 11.sp)
+                        Text("$confidence%", color = if (confidence < 30) Color(0xFFEF5350) else TouchLime, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    LinearProgressIndicator(
+                        progress = { confidence / 100f },
+                        color = if (confidence < 30) Color(0xFFEF5350) else TouchLime,
+                        trackColor = Color(0xFF0E2015),
+                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp))
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Budget £${user.budget / 1000}k · Wages £${wageBill / 1000}k/wk",
+                        color = if (user.budget < 0) Color(0xFFEF5350) else MutedGrass, fontSize = 12.sp
+                    )
+                }
             }
         }
 
+        // Next match
         item {
             Card(colors = CardDefaults.cardColors(containerColor = PanelGreen), shape = RoundedCornerShape(14.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp)) {
                     if (fixture != null) {
                         val opp = if (fixture.homeId == user.id) s.team(fixture.awayId) else s.team(fixture.homeId)
                         val venue = if (fixture.homeId == user.id) "Home" else "Away"
+                        val oppPos = table.indexOfFirst { it.teamId == opp.id } + 1
                         Text("NEXT MATCH", color = TouchLime, fontSize = 11.sp, letterSpacing = 2.sp)
                         Spacer(Modifier.height(6.dp))
                         Text("${opp.name}  ·  $venue", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                        Text("Their reputation: ${opp.reputation}", color = MutedGrass, fontSize = 12.sp)
+                        Text("${ordinalText(oppPos)} in the league · reputation ${opp.reputation}", color = MutedGrass, fontSize = 12.sp)
                         Spacer(Modifier.height(12.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             Button(
@@ -163,6 +203,8 @@ fun ordinalText(n: Int): String = when {
     else -> "${n}th"
 }
 
+fun surname(name: String): String = name.substringAfterLast(' ')
+
 // ----------------------------------------------------------------- SQUAD ----
 
 @Composable
@@ -184,6 +226,18 @@ fun SquadScreen(vm: GameViewModel) {
 }
 
 @Composable
+fun StatusBadge(text: String, color: Color) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(color.copy(alpha = 0.2f))
+            .padding(horizontal = 4.dp, vertical = 1.dp)
+    ) {
+        Text(text, color = color, fontSize = 9.sp, fontWeight = FontWeight.Black)
+    }
+}
+
+@Composable
 fun PlayerRow(p: Player, starter: Boolean = false, trailing: String? = null, onClick: () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = PanelGreen),
@@ -198,8 +252,15 @@ fun PlayerRow(p: Player, starter: Boolean = false, trailing: String? = null, onC
                 modifier = Modifier.width(30.dp)
             )
             Column(Modifier.weight(1f)) {
-                Text(p.name, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                Text("Age ${p.age} · ${p.seasonGoals} gls · ${p.seasonApps} apps", color = MutedGrass, fontSize = 11.sp)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text(p.name, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    if (p.injuryWeeks > 0) StatusBadge("INJ ${p.injuryWeeks}w", Color(0xFFEF5350))
+                    if (p.banMatches > 0) StatusBadge("BAN", Color(0xFFE0C341))
+                }
+                Text(
+                    "Age ${p.age} · form ${"%.1f".format(p.form)} · ${p.seasonGoals} gls · £${p.wage}/wk",
+                    color = MutedGrass, fontSize = 11.sp
+                )
             }
             if (trailing != null) {
                 Text(trailing, color = TouchLime, fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -252,6 +313,8 @@ fun PlayerDetailDialog(vm: GameViewModel, playerId: Int) {
         text = {
             Column {
                 Text("${p.position.label} · Age ${p.age} · ${s.team(p.teamId).name}", color = MutedGrass, fontSize = 13.sp)
+                if (p.injuryWeeks > 0) Text("Injured — ${p.injuryWeeks} week(s) remaining", color = Color(0xFFEF5350), fontSize = 12.sp)
+                if (p.banMatches > 0) Text("Suspended — misses the next match", color = Color(0xFFE0C341), fontSize = 12.sp)
                 Spacer(Modifier.height(10.dp))
                 AttrBar("Pace", p.attr.pace)
                 AttrBar("Shooting", p.attr.shooting)
@@ -261,7 +324,10 @@ fun PlayerDetailDialog(vm: GameViewModel, playerId: Int) {
                 AttrBar("Physical", p.attr.physical)
                 if (p.position == Position.GK) AttrBar("Keeping", p.attr.keeping)
                 Spacer(Modifier.height(8.dp))
-                Text("Overall ${p.overall} · Value £${p.value / 1000}k · Morale ${p.morale}", fontSize = 12.sp, color = MutedGrass)
+                Text(
+                    "Overall ${p.overall} · Form ${"%.1f".format(p.form)} · £${p.wage}/wk\nValue £${p.value / 1000}k · Morale ${p.morale} · ${p.seasonYellows} yellow(s)",
+                    fontSize = 12.sp, color = MutedGrass
+                )
                 message?.let {
                     Spacer(Modifier.height(6.dp))
                     Text(it, color = Color(0xFFEF5350), fontSize = 12.sp)
@@ -288,77 +354,187 @@ fun AttrBar(label: String, value: Int) {
 
 // --------------------------------------------------------------- TACTICS ----
 
+private data class SlotSpec(val fx: Float, val fy: Float)
+
+/** Slot layout for the formation: index-aligned with startingXI (GK, DFs, MFs, FWs). */
+private fun slotSpecs(f: Formation): List<SlotSpec> {
+    val specs = mutableListOf<SlotSpec>()
+    fun line(fy: Float, count: Int) {
+        for (i in 0 until count) specs.add(SlotSpec((i + 1f) / (count + 1f), fy))
+    }
+    line(0.90f, 1)
+    line(0.70f, f.df)
+    line(0.46f, f.mf)
+    line(0.22f, f.fw)
+    return specs
+}
+
 @Composable
 fun TacticsScreen(vm: GameViewModel) {
     val s = vm.state ?: return
     val user = s.userTeam()
     val tactics = user.tactics
-    var swapping by remember { mutableStateOf<Int?>(null) }
+    var slotDialogFor by remember { mutableStateOf<Int?>(null) }   // player id
 
-    LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        item {
-            Text("Tactics", fontSize = 22.sp, fontWeight = FontWeight.Black)
-            Spacer(Modifier.height(8.dp))
-            SectionLabel("FORMATION")
-            Spacer(Modifier.height(4.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Formation.entries.forEach { f ->
-                    FilterChip(
-                        selected = tactics.formation == f,
-                        onClick = { vm.setFormation(f) },
-                        label = { Text(f.label, fontSize = 12.sp) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = TouchLime,
-                            selectedLabelColor = Color(0xFF10240F)
-                        )
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Text("Tactics", fontSize = 22.sp, fontWeight = FontWeight.Black)
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Formation.entries.forEach { f ->
+                FilterChip(
+                    selected = tactics.formation == f,
+                    onClick = { vm.setFormation(f) },
+                    label = { Text(f.label, fontSize = 11.sp) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = TouchLime,
+                        selectedLabelColor = Color(0xFF10240F)
                     )
-                }
+                )
             }
-            Spacer(Modifier.height(12.dp))
-            SectionLabel("MENTALITY")
-            Slider(
-                value = tactics.mentality.toFloat(),
-                onValueChange = { vm.setMentality(it.toInt()) },
-                onValueChangeFinished = { vm.saveGame() },
-                valueRange = 0f..100f,
-                colors = SliderDefaults.colors(thumbColor = TouchLime, activeTrackColor = TouchLime)
-            )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Defensive", color = MutedGrass, fontSize = 11.sp)
-                Text("Balanced", color = MutedGrass, fontSize = 11.sp)
-                Text("Attacking", color = MutedGrass, fontSize = 11.sp)
-            }
-            Spacer(Modifier.height(12.dp))
-            SectionLabel("STARTING XI — tap a starter to swap")
-            Spacer(Modifier.height(4.dp))
         }
+        Spacer(Modifier.height(6.dp))
 
-        val starters = tactics.startingXI.mapNotNull { s.player(it) }
-        items(starters) { p ->
-            PlayerRow(p, starter = true) { swapping = p.id }
+        // The pitch board — attack plays up the screen
+        BoxWithConstraints(
+            Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .clip(RoundedCornerShape(12.dp))
+        ) {
+            val bw = maxWidth
+            val bh = maxHeight
+            TacticsPitch(Modifier.fillMaxSize())
+            val specs = slotSpecs(tactics.formation)
+            val xi = tactics.startingXI
+            for (i in 0 until minOf(11, xi.size)) {
+                val p = s.player(xi[i]) ?: continue
+                val spec = specs[i.coerceAtMost(specs.size - 1)]
+                PlayerSlot(
+                    p = p,
+                    kitColor = Color(user.colorPrimary),
+                    modifier = Modifier
+                        .offset(x = bw * spec.fx - 31.dp, y = bh * spec.fy - 34.dp)
+                        .width(62.dp)
+                        .clickable { slotDialogFor = p.id }
+                )
+            }
+        }
+        Text(
+            "Attacking up the pitch · tap a player to change or reposition",
+            color = MutedGrass, fontSize = 11.sp,
+            modifier = Modifier.align(Alignment.CenterHorizontally).padding(vertical = 4.dp)
+        )
+
+        SectionLabel("MENTALITY")
+        Slider(
+            value = tactics.mentality.toFloat(),
+            onValueChange = { vm.setMentality(it.toInt()) },
+            onValueChangeFinished = { vm.saveGame() },
+            valueRange = 0f..100f,
+            colors = SliderDefaults.colors(thumbColor = TouchLime, activeTrackColor = TouchLime)
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("Defensive", color = MutedGrass, fontSize = 11.sp)
+            Text("Attacking", color = MutedGrass, fontSize = 11.sp)
         }
     }
 
-    swapping?.let { outId ->
-        val outPlayer = s.player(outId)
-        val bench = s.squad(s.userTeamId).filter { it.id !in tactics.startingXI }
-            .sortedByDescending { it.overall }
+    slotDialogFor?.let { pid ->
+        val p = s.player(pid)
+        val xi = tactics.startingXI
+        val bench = s.squad(s.userTeamId).filter { it.id !in xi }
+            .sortedWith(compareBy({ it.position != p?.position }, { -it.overall }))
+        val others = xi.mapNotNull { s.player(it) }.filter { it.id != pid }
         AlertDialog(
-            onDismissRequest = { swapping = null },
+            onDismissRequest = { slotDialogFor = null },
             confirmButton = {},
-            dismissButton = { TextButton(onClick = { swapping = null }) { Text("Cancel") } },
-            title = { Text("Replace ${outPlayer?.name ?: ""}") },
+            dismissButton = { TextButton(onClick = { slotDialogFor = null }) { Text("Cancel") } },
+            title = { Text(p?.name ?: "") },
             text = {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.height(360.dp)) {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(5.dp), modifier = Modifier.height(400.dp)) {
+                    item { SectionLabel("BRING ON") }
                     items(bench) { b ->
                         PlayerRow(b) {
-                            vm.swapStarter(outId, b.id)
-                            swapping = null
+                            vm.swapStarter(pid, b.id)
+                            slotDialogFor = null
+                        }
+                    }
+                    item {
+                        Spacer(Modifier.height(6.dp))
+                        SectionLabel("SWAP POSITION WITH")
+                    }
+                    items(others) { o ->
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = PanelGreen),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                vm.swapPositions(pid, o.id)
+                                slotDialogFor = null
+                            }
+                        ) {
+                            Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(o.position.label, color = MutedGrass, fontSize = 11.sp, modifier = Modifier.width(28.dp))
+                                Text(o.name, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                                Text("${o.overall}", color = TouchLime, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
             }
         )
+    }
+}
+
+@Composable
+private fun PlayerSlot(p: Player, kitColor: Color, modifier: Modifier) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(PanelGreen)
+                .border(2.5.dp, if (p.available) kitColor else Color(0xFFEF5350), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("${p.overall}", color = ChalkWhite, fontWeight = FontWeight.Black, fontSize = 14.sp)
+        }
+        Text(
+            surname(p.name),
+            color = ChalkWhite, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            if (!p.available) (if (p.injuryWeeks > 0) "INJ" else "BAN") else "%.1f".format(p.form),
+            color = if (!p.available) Color(0xFFEF5350) else MutedGrass,
+            fontSize = 9.sp
+        )
+    }
+}
+
+@Composable
+private fun TacticsPitch(modifier: Modifier) {
+    Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        // Grass
+        val stripes = 8
+        for (i in 0 until stripes) {
+            drawRect(
+                color = if (i % 2 == 0) Color(0xFF11351F) else Color(0xFF153E24),
+                topLeft = Offset(0f, h * i / stripes),
+                size = Size(w, h / stripes + 1f)
+            )
+        }
+        val lc = Color(0x55FFFFFF)
+        val line = Stroke(width = 1.5.dp.toPx())
+        drawRect(lc, topLeft = Offset(2f, 2f), size = Size(w - 4f, h - 4f), style = line)
+        drawLine(lc, Offset(0f, h / 2), Offset(w, h / 2), strokeWidth = line.width)
+        drawCircle(lc, radius = w * 0.13f, center = Offset(w / 2, h / 2), style = line)
+        // Boxes top and bottom
+        val bw = w * 0.55f
+        val bh = h * 0.14f
+        drawRect(lc, topLeft = Offset((w - bw) / 2, 2f), size = Size(bw, bh), style = line)
+        drawRect(lc, topLeft = Offset((w - bw) / 2, h - bh - 2f), size = Size(bw, bh), style = line)
     }
 }
 

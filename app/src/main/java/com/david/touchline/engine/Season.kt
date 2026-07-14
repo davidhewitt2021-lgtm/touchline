@@ -15,11 +15,46 @@ object Season {
         fixture.played = true
         fixture.homeGoals = res.homeGoals
         fixture.awayGoals = res.awayGoals
-        // Appearances + morale
-        for (id in state.team(fixture.homeId).tactics.startingXI) state.player(id)?.let { it.seasonApps++ }
-        for (id in state.team(fixture.awayId).tactics.startingXI) state.player(id)?.let { it.seasonApps++ }
+        val rng = Random(state.seed + fixture.round * 31L + fixture.homeId)
+        ratePlayers(state, state.team(fixture.homeId), res.homeGoals - res.awayGoals, res, rng)
+        ratePlayers(state, state.team(fixture.awayId), res.awayGoals - res.homeGoals, res, rng)
         adjustMorale(state, fixture.homeId, res.homeGoals - res.awayGoals)
         adjustMorale(state, fixture.awayId, res.awayGoals - res.homeGoals)
+    }
+
+    private fun ratePlayers(state: GameState, team: Team, gd: Int, res: MatchResult, rng: Random) {
+        val conceded = if (team.id == res.homeId) res.awayGoals else res.homeGoals
+        for (id in team.tactics.startingXI) {
+            val p = state.player(id) ?: continue
+            p.seasonApps++
+            val goals = res.events.count { it.type == EventType.GOAL && it.playerId == p.id }
+            var rating = 6.1 + goals * 1.2 +
+                (if (gd > 0) 0.5 else if (gd < 0) -0.5 else 0.0) +
+                rng.nextDouble(-0.8, 0.8)
+            if (p.position == Position.GK && conceded == 0) rating += 0.8
+            rating = rating.coerceIn(4.0, 10.0)
+            p.form = p.form * 0.7 + rating * 0.3
+            p.seasonRatingSum += rating
+            // Bookings accumulate towards a one-match ban
+            val booked = res.events.any { it.type == EventType.CARD && it.playerId == p.id }
+            if (booked) {
+                p.seasonYellows++
+                if (p.seasonYellows % 5 == 0) {
+                    p.banMatches = 2   // decremented once this round -> misses the next
+                    if (p.teamId == state.userTeamId) {
+                        state.inbox.add("${p.name} is suspended for the next match (5 bookings).")
+                    }
+                }
+            }
+            // Knocks and injuries
+            if (rng.nextDouble() < 0.025) {
+                val weeks = rng.nextInt(1, 5)
+                p.injuryWeeks = weeks + 1   // decremented once this round
+                if (p.teamId == state.userTeamId) {
+                    state.inbox.add("${p.name} has picked up an injury — out for $weeks week${if (weeks > 1) "s" else ""}.")
+                }
+            }
+        }
     }
 
     private fun adjustMorale(state: GameState, teamId: Int, gd: Int) {
@@ -37,6 +72,31 @@ object Season {
         for (f in roundFixtures) {
             if (!f.played) simulateFixture(state, f)
         }
+
+        // Weekly wages come off every budget
+        for (team in state.teams) {
+            team.budget -= state.squad(team.id).sumOf { it.wage }
+        }
+        val user = state.userTeam()
+        if (user.budget < 0 && state.round % 4 == 0) {
+            state.inbox.add("The accounts are in the red. The board expects player sales to balance the books.")
+        }
+
+        // Injuries heal and bans are served
+        for (p in state.players) {
+            if (p.injuryWeeks > 0) p.injuryWeeks--
+            if (p.banMatches > 0) p.banMatches--
+        }
+
+        // Board keeps an eye on the table
+        val conf = boardConfidence(state)
+        if (state.round % 6 == 0) {
+            when {
+                conf >= 85 -> state.inbox.add("The board is delighted with the club's progress this season.")
+                conf <= 25 -> state.inbox.add("The board is concerned about results. Improvement is expected soon.")
+            }
+        }
+
         state.round++
         if (state.round > state.totalRounds) {
             endOfSeason(state)
@@ -70,12 +130,29 @@ object Season {
             }
         }
 
+        // End-of-season awards
+        val golden = state.players.maxByOrNull { it.seasonGoals }
+        if (golden != null && golden.seasonGoals > 0) {
+            state.inbox.add("Golden Boot: ${golden.name} (${state.team(golden.teamId).name}) with ${golden.seasonGoals} goals.")
+        }
+        val pots = state.players.filter { it.seasonApps >= 15 }
+            .maxByOrNull { it.seasonRatingSum / it.seasonApps }
+        if (pots != null) {
+            val avg = pots.seasonRatingSum / pots.seasonApps
+            state.inbox.add("Player of the Season: ${pots.name} (${state.team(pots.teamId).name}), average rating ${"%.2f".format(avg)}.")
+        }
+
         // Player development, ageing, retirement
         val retiring = mutableListOf<Player>()
         for (p in state.players) {
             p.age++
             p.seasonGoals = 0
             p.seasonApps = 0
+            p.seasonYellows = 0
+            p.seasonRatingSum = 0.0
+            p.form = 6.5
+            p.injuryWeeks = 0
+            p.banMatches = 0
             p.fitness = 100
             developPlayer(p, rng)
             if (p.age >= 34 && rng.nextInt(100) < (p.age - 32) * 25) retiring.add(p)

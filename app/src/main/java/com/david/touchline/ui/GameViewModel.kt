@@ -164,6 +164,20 @@ class GameViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Swaps the slots of two players already in the starting XI (left/right, lines). */
+    fun swapPositions(idA: Int, idB: Int) {
+        val s = state ?: return
+        val xi = s.userTeam().tactics.startingXI
+        val a = xi.indexOf(idA)
+        val b = xi.indexOf(idB)
+        if (a >= 0 && b >= 0 && a != b) {
+            xi[a] = idB
+            xi[b] = idA
+            saveGame()
+            touch()
+        }
+    }
+
     /** Builds a fresh world so the new-game screen can show real clubs to choose from. */
     fun buildWorldPreview(): GameState = WorldGen.newGame(System.currentTimeMillis())
 }
