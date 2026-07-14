@@ -7,18 +7,18 @@ import kotlin.math.sin
 import kotlin.random.Random
 
 /**
- * Tick-based 2D match simulation, v2.
+ * Tick-based 2D match simulation, v3.
  *
  * Pitch coordinates: x in [0, 105], y in [0, 68] (metres).
  * Home attacks towards x = 105; away attacks towards x = 0.
  * One tick = one second of match time; 5400 ticks = 90 minutes.
  *
- * v2 additions:
- *  - Player roles (CB, FB, CM, WG, ST) with individual movement behaviour
- *  - Per-player variance and wobble so lines never move in lockstep
- *  - Wing play: wide players carry to the byline and cross; headers in the box
- *  - Set pieces: free kicks (direct or crossed), penalties, corners
- *  - Ball height for lofted deliveries (frame layout: [bx, by, bz, 22 * (x,y)])
+ * v3: set pieces are properly choreographed. When one is awarded, every
+ * player is assigned an explicit target (computed once in beginSetup) and
+ * jogs there during a setup phase: defensive walls for free kicks, the
+ * penalty-arc line-up for penalties, man-marking in the box for corners,
+ * throw-ins when the ball goes out wide, and full kick-off line-ups after
+ * goals and at each half.
  */
 
 const val PITCH_W = 105.0
@@ -54,18 +54,16 @@ private class SimPlayer(
     var anchorY: Double,
     var x: Double,
     var y: Double,
-    /** Individual movement personality so no two players track the ball identically. */
     val pullVar: Double,
     val wobblePhase: Double
 ) {
     val speed: Double get() = 2.2 + player.attr.pace / 38.0
     val isGK: Boolean get() = role == Role.GK
-    /** Wide players live in a touchline lane. */
     val laneY: Double get() = if (anchorY < PITCH_H / 2) 7.0 else PITCH_H - 7.0
 }
 
 private enum class Phase { OPEN, SETUP }
-private enum class SetPiece { NONE, KICKOFF, FREEKICK, PENALTY, CORNER }
+private enum class SetPiece { NONE, KICKOFF, FREEKICK, PENALTY, CORNER, THROWIN }
 
 class MatchEngine(
     private val state: GameState,
@@ -99,8 +97,10 @@ class MatchEngine(
     private var spTicks = 0
     private var spX = 0.0
     private var spY = 0.0
-    private var spHome = true       // attacking side for the set piece
+    private var spHome = true
     private var spKicker: SimPlayer? = null
+    private val spTargets = HashMap<Int, Pair<Double, Double>>()
+    private var pendingKickoffToHome: Boolean? = null
 
     private var tick = 0
 
@@ -150,7 +150,7 @@ class MatchEngine(
         return ids.mapNotNull { state.player(it) }
     }
 
-    private fun setup() {
+    private fun setupPlayers() {
         players.clear()
         for (side in listOf(true, false)) {
             val team = if (side) homeTeam else awayTeam
@@ -171,16 +171,6 @@ class MatchEngine(
         }
     }
 
-    private fun kickoff(toHome: Boolean) {
-        ballX = PITCH_W / 2; ballY = PITCH_H / 2; ballZ = 0.0
-        flightTicks = 0; pendingReceiver = null; headerOnArrival = false
-        phase = Phase.OPEN; setPiece = SetPiece.NONE
-        for (sp in players) { sp.x = sp.anchorX; sp.y = sp.anchorY }
-        val side = players.filter { it.home == toHome && !it.isGK }
-        owner = side.minByOrNull { hypot(it.anchorX - ballX, it.anchorY - ballY) }
-        owner?.let { it.x = ballX; it.y = ballY }
-    }
-
     private fun minuteOf(t: Int) = (t / 60) + 1
 
     private fun addEvent(type: EventType, sp: SimPlayer?, text: String, forHome: Boolean? = null) {
@@ -196,7 +186,6 @@ class MatchEngine(
     private fun keeperOf(home: Boolean): SimPlayer = players.first { it.home == home && it.isGK }
     private fun teamOf(home: Boolean) = if (home) homeTeam else awayTeam
 
-    /** Is (x, y) inside the penalty box that `attackingHome` is attacking? */
     private fun inAttackedBox(x: Double, y: Double, attackingHome: Boolean): Boolean {
         val inY = y > 13.85 && y < 54.15
         return if (attackingHome) x > PITCH_W - 16.5 && inY else x < 16.5 && inY
@@ -205,15 +194,15 @@ class MatchEngine(
     // ---------------------------------------------------------- main loop ----
 
     fun simulate(): MatchResult {
-        setup()
-        kickoff(toHome = true)
+        setupPlayers()
+        beginKickoff(toHome = true)
         var secondHalfStarted = false
 
         while (tick < TICKS) {
             if (!secondHalfStarted && tick >= TICKS / 2) {
                 secondHalfStarted = true
                 addEvent(EventType.INFO, null, "Half-time: ${homeTeam.short} ${result.homeGoals} - ${result.awayGoals} ${awayTeam.short}", forHome = true)
-                kickoff(toHome = false)
+                beginKickoff(toHome = false)
             }
 
             stepTick()
@@ -237,9 +226,18 @@ class MatchEngine(
     }
 
     private fun stepTick() {
-        maybeKickoff()
+        // Restart with a proper kick-off once the post-goal flight has landed
+        pendingKickoffToHome?.let { toHome ->
+            if (flightTicks <= 0) {
+                pendingKickoffToHome = null
+                beginKickoff(toHome)
+            }
+        }
         if (phase == Phase.SETUP) {
-            moveToSetPiecePositions()
+            for (sp in players) {
+                val (tx, ty) = spTargets[sp.globalIdx] ?: (sp.anchorX to sp.anchorY)
+                stepTowards(sp, tx, ty, sp.speed * 1.15)
+            }
             spTicks--
             if (spTicks <= 0) executeSetPiece()
             return
@@ -264,7 +262,6 @@ class MatchEngine(
                     val wide = sp.role == Role.WG || sp.role == Role.FB
                     val inAttackHalf = if (sp.home) sp.x > PITCH_W * 0.45 else sp.x < PITCH_W * 0.55
                     if (wide && inAttackHalf) {
-                        // Carry it down the wing towards the byline
                         tx = if (sp.home) PITCH_W - 3.0 else 3.0
                         ty = sp.laneY
                     } else {
@@ -278,7 +275,6 @@ class MatchEngine(
                 }
                 else -> {
                     val attacking = o != null && o.home == sp.home
-                    // Role-specific ball attraction, with per-player personality
                     val pull = when (sp.role) {
                         Role.CB -> if (attacking) 0.22 else 0.30
                         Role.FB -> if (attacking) 0.45 else 0.34
@@ -288,23 +284,19 @@ class MatchEngine(
                         Role.GK -> 0.0
                     } * sp.pullVar
                     tx = sp.anchorX + (ballX - PITCH_W / 2) * pull
-                    // Wide players hold their lane; central players compress towards the ball
                     ty = if (sp.role == Role.WG || sp.role == Role.FB) {
                         sp.laneY + (ballY - sp.laneY) * 0.10
                     } else {
                         sp.anchorY + (ballY - sp.anchorY) * 0.28
                     }
-                    // Strikers push up onto the last line when their team attacks
                     if (attacking && sp.role == Role.ST) {
                         val lastDefX = players.filter { it.home != sp.home && !it.isGK }
                             .map { it.x }
                             .let { if (sp.home) it.maxOrNull() else it.minOrNull() } ?: tx
                         tx = if (sp.home) maxOf(tx, lastDefX - 1.0) else minOf(tx, lastDefX + 1.0)
                     }
-                    // Gentle individual wobble so lines break up
                     ty += sin((tick + sp.wobblePhase * 60) * 0.045) * 1.6 * sp.pullVar
                     tx += sin((tick + sp.wobblePhase * 47) * 0.032) * 1.1 * sp.pullVar
-                    // Nearest defenders press the carrier
                     if (o != null && o.home != sp.home) {
                         val d = hypot(sp.x - ballX, sp.y - ballY)
                         if (d < 13.0) { tx = ballX; ty = ballY }
@@ -395,7 +387,6 @@ class MatchEngine(
             return
         }
 
-        // Tackle attempt against the carrier -> may win the ball or give away a foul
         val tackler = players.filter { it.home != c.home && !it.isGK }
             .minByOrNull { hypot(it.x - c.x, it.y - c.y) }
         if (tackler != null && hypot(tackler.x - c.x, tackler.y - c.y) < 2.2) {
@@ -403,7 +394,6 @@ class MatchEngine(
             val dri = c.player.attr.dribbling.toDouble()
             if (rng.nextDouble() < def / (def + dri) * 0.22) {
                 if (rng.nextDouble() < 0.12) {
-                    // Foul on the carrier: free kick or penalty to the carrier's team
                     if (rng.nextDouble() < 0.30) {
                         addEvent(EventType.CARD, tackler, "${tackler.player.name} is booked for the foul")
                     }
@@ -416,7 +406,6 @@ class MatchEngine(
             }
         }
 
-        // Wide players near the byline whip in a cross
         val wide = abs(c.y - PITCH_H / 2) > 18.0
         val nearByline = if (c.home) c.x > PITCH_W - 24.0 else c.x < 24.0
         if (wide && nearByline && (c.role == Role.WG || c.role == Role.FB || rng.nextDouble() < 0.3)) {
@@ -426,7 +415,6 @@ class MatchEngine(
             }
         }
 
-        // Shooting (central positions mostly)
         if (distGoal < 28.0 && !wide) {
             val homeBoost = if (c.home) 1.08 else 1.0
             val shootProb = ((30.0 - distGoal) / 30.0) * 0.045 * mFactor * homeBoost *
@@ -437,7 +425,6 @@ class MatchEngine(
             }
         }
 
-        // Passing
         val basePassProb = 0.22 + pressure * 0.15
         if (rng.nextDouble() < basePassProb) passBall(c)
     }
@@ -448,7 +435,6 @@ class MatchEngine(
         val goalX = goalXFor(c.home)
         val candidates = mates.filter { hypot(it.x - c.x, it.y - c.y) < 42.0 }
         if (candidates.isEmpty()) return
-        // Sometimes deliberately spread play to a wide runner
         val target = if (rng.nextDouble() < 0.25) {
             candidates.filter { it.role == Role.WG || it.role == Role.FB }.randomOrNull(rng)
                 ?: candidates.random(rng)
@@ -466,13 +452,20 @@ class MatchEngine(
         if (rng.nextDouble() < success) {
             startFlight(target.x, target.y, 14.0, target, height)
         } else {
-            val interceptor = players.filter { it.home != c.home }
-                .minByOrNull { hypot(it.x - target.x, it.y - target.y) }
-            startFlight(
-                target.x + rng.nextDouble(-6.0, 6.0),
-                target.y + rng.nextDouble(-6.0, 6.0),
-                14.0, interceptor, height
-            )
+            // Misplaced: out for a throw-in sometimes, otherwise intercepted
+            val outY = target.y + rng.nextDouble(-8.0, 8.0)
+            if ((outY < 1.5 || outY > PITCH_H - 1.5) && rng.nextDouble() < 0.6) {
+                val tx = (c.x + target.x) / 2 + rng.nextDouble(-5.0, 5.0)
+                awardThrowIn(tx.coerceIn(4.0, PITCH_W - 4.0), if (outY < 1.5) 0.5 else PITCH_H - 0.5, toHome = !c.home)
+            } else {
+                val interceptor = players.filter { it.home != c.home }
+                    .minByOrNull { hypot(it.x - target.x, it.y - target.y) }
+                startFlight(
+                    target.x + rng.nextDouble(-6.0, 6.0),
+                    (target.y + rng.nextDouble(-6.0, 6.0)).coerceIn(1.0, PITCH_H - 1.0),
+                    14.0, interceptor, height
+                )
+            }
         }
     }
 
@@ -542,7 +535,6 @@ class MatchEngine(
                 pendingKickoffToHome = !c.home
                 return
             }
-            // Saved -> chance of a corner
             addEvent(EventType.SAVE, c, "${keeper.player.name} saves from ${c.player.name}")
             if (!penalty && rng.nextDouble() < 0.28) {
                 awardCorner(c.home)
@@ -555,8 +547,6 @@ class MatchEngine(
         }
     }
 
-    private var pendingKickoffToHome: Boolean? = null
-
     private fun giveGoalKick(keeper: SimPlayer) {
         owner = keeper
         keeper.x = keeper.anchorX; keeper.y = keeper.anchorY
@@ -566,6 +556,7 @@ class MatchEngine(
     // --------------------------------------------------------- set pieces ----
 
     private fun awardFreeKickOrPenalty(fouled: SimPlayer) {
+        spHome = fouled.home
         if (inAttackedBox(fouled.x, fouled.y, fouled.home) && rng.nextDouble() < 0.35) {
             setPiece = SetPiece.PENALTY
             spX = if (fouled.home) PITCH_W - 11.0 else 11.0
@@ -577,7 +568,6 @@ class MatchEngine(
             spY = fouled.y
             addEvent(EventType.FREEKICK, fouled, "Free kick to ${teamOf(fouled.home).name}")
         }
-        spHome = fouled.home
         beginSetup()
     }
 
@@ -591,64 +581,212 @@ class MatchEngine(
         beginSetup()
     }
 
+    private fun awardThrowIn(x: Double, y: Double, toHome: Boolean) {
+        setPiece = SetPiece.THROWIN
+        spHome = toHome
+        spX = x
+        spY = y
+        beginSetup()
+    }
+
+    private fun beginKickoff(toHome: Boolean) {
+        setPiece = SetPiece.KICKOFF
+        spHome = toHome
+        spX = PITCH_W / 2
+        spY = PITCH_H / 2
+        beginSetup()
+    }
+
+    /**
+     * Computes an explicit target position for all 22 players and enters the
+     * setup phase. Players jog to their spots; the delivery happens when the
+     * countdown ends.
+     */
     private fun beginSetup() {
         phase = Phase.SETUP
-        spTicks = 10
         flightTicks = 0; pendingReceiver = null; headerOnArrival = false
         owner = null
         ballX = spX; ballY = spY; ballZ = 0.0
-        // Best available taker: shooter for pens/FKs, crosser for corners
-        val side = players.filter { it.home == spHome && !it.isGK }
+        spTargets.clear()
+
+        val atkGoalX = goalXFor(spHome)           // goal being attacked
+        val dir = if (spHome) 1.0 else -1.0        // attacking direction along x
+        val side = players.filter { it.home == spHome }
+        val opps = players.filter { it.home != spHome }
+
         spKicker = when (setPiece) {
-            SetPiece.CORNER -> side.maxByOrNull { it.player.attr.passing }
-            else -> side.maxByOrNull { it.player.attr.shooting }
+            SetPiece.CORNER, SetPiece.THROWIN -> side.filter { !it.isGK }.maxByOrNull { it.player.attr.passing }
+            SetPiece.KICKOFF -> side.firstOrNull { it.role == Role.ST } ?: side.last()
+            else -> side.filter { !it.isGK }.maxByOrNull { it.player.attr.shooting }
         }
-    }
-
-    private fun moveToSetPiecePositions() {
         val kicker = spKicker
-        val goalX = goalXFor(spHome)
-        val boxCentreX = if (spHome) PITCH_W - 9.0 else 9.0
-        var atkSlot = 0
-        var defSlot = 0
-        for (sp in players) {
-            val (tx, ty) = when {
-                sp === kicker -> spX to spY
-                sp.isGK -> sp.anchorX to PITCH_H / 2
-                setPiece == SetPiece.PENALTY ->
-                    // Everyone else waits around the edge of the box
-                    (if (sp.home == spHome) boxCentreX + (if (spHome) -14.0 else 14.0)
-                    else boxCentreX + (if (spHome) -17.0 else 17.0)) to (10.0 + (sp.globalIdx % 10) * 5.0)
-                sp.home == spHome && (sp.role == Role.ST || sp.role == Role.CB || sp.role == Role.CM) -> {
-                    // Attackers crowd the box
-                    atkSlot++
-                    (boxCentreX + rngStable(sp, 6.0)) to (PITCH_H / 2 - 12.0 + atkSlot * 5.0)
+
+        fun place(sp: SimPlayer, x: Double, y: Double) {
+            spTargets[sp.globalIdx] = x.coerceIn(0.5, PITCH_W - 0.5) to y.coerceIn(0.5, PITCH_H - 0.5)
+        }
+
+        // Deterministic small offset per player (stable across ticks)
+        fun jig(sp: SimPlayer, range: Double) = ((sp.wobblePhase / 6.28) - 0.5) * 2 * range
+
+        when (setPiece) {
+            SetPiece.KICKOFF -> {
+                spTicks = 12
+                for (sp in players) {
+                    if (sp === kicker) place(sp, spX - dir * 0.5, spY)
+                    else {
+                        // Everyone in their own half, at their anchors
+                        val ownHalfX = if (sp.home) sp.anchorX.coerceAtMost(PITCH_W / 2 - 1.5)
+                        else sp.anchorX.coerceAtLeast(PITCH_W / 2 + 1.5)
+                        place(sp, ownHalfX, sp.anchorY)
+                    }
                 }
-                sp.home != spHome && !sp.isGK && (sp.role == Role.CB || sp.role == Role.CM || sp.role == Role.FB) -> {
-                    // Defenders mark inside the box
-                    defSlot++
-                    (boxCentreX + (if (spHome) 2.0 else -2.0) + rngStable(sp, 4.0)) to (PITCH_H / 2 - 12.0 + defSlot * 4.5)
+                // A second striker stands beside the kicker for the tap-off
+                side.filter { it.role == Role.ST && it !== kicker }.firstOrNull()?.let {
+                    place(it, spX - dir * 2.0, spY - 2.0)
                 }
-                else -> (sp.anchorX + (goalX - PITCH_W / 2) * 0.3) to sp.anchorY
             }
-            stepTowards(sp, tx.coerceIn(0.5, PITCH_W - 0.5), ty.coerceIn(0.5, PITCH_H - 0.5), sp.speed * 1.2)
+
+            SetPiece.PENALTY -> {
+                spTicks = 14
+                val boxEdgeX = if (spHome) PITCH_W - 16.5 else 16.5
+                val defGK = keeperOf(!spHome)
+                place(defGK, if (spHome) PITCH_W - 0.8 else 0.8, PITCH_H / 2)
+                place(keeperOf(spHome), keeperOf(spHome).anchorX, PITCH_H / 2)
+                // Everyone else lines the edge of the box along the D
+                val others = players.filter { it !== kicker && !it.isGK }
+                others.forEachIndexed { i, sp ->
+                    val t = -1.0 + 2.0 * i / (others.size - 1).coerceAtLeast(1)
+                    val bulge = 2.0 + 4.5 * (1 - t * t)      // arc outside the box
+                    place(sp, boxEdgeX - dir * bulge, PITCH_H / 2 + t * 21.0)
+                }
+                kicker?.let { place(it, spX - dir * 3.0, spY) }
+            }
+
+            SetPiece.FREEKICK -> {
+                spTicks = 12
+                val goalCX = atkGoalX
+                val goalCY = PITCH_H / 2
+                val distGoal = hypot(goalCX - spX, goalCY - spY)
+                // Wall: defenders between ball and goal, 9.15m away
+                val ux = (goalCX - spX) / distGoal
+                val uy = (goalCY - spY) / distGoal
+                val wallN = when {
+                    distGoal < 20 -> 4
+                    distGoal < 30 -> 3
+                    else -> 2
+                }
+                val wallers = opps.filter { !it.isGK }
+                    .sortedByDescending { it.player.attr.physical }
+                    .take(wallN)
+                wallers.forEachIndexed { i, sp ->
+                    val off = (i - (wallN - 1) / 2.0) * 0.9
+                    place(sp, spX + ux * 9.15 - uy * off, spY + uy * 9.15 + ux * off)
+                }
+                // Defending keeper covers the far side
+                place(keeperOf(!spHome), if (spHome) PITCH_W - 0.8 else 0.8, goalCY + (if (spY < goalCY) 2.0 else -2.0))
+                // In crossing range? Crowd the box on both sides
+                val crossing = distGoal >= 26.0
+                var atkSlot = 0
+                var defSlot = 0
+                for (sp in players) {
+                    if (sp === kicker || sp.isGK || sp in wallers) continue
+                    if (sp.home == spHome && (sp.role == Role.ST || sp.role == Role.CB || (crossing && sp.role == Role.CM))) {
+                        atkSlot++
+                        place(sp, atkGoalX - dir * (7.0 + jig(sp, 3.0) + 3.0), PITCH_H / 2 - 12.0 + atkSlot * 5.0)
+                    } else if (sp.home != spHome && (sp.role == Role.CB || sp.role == Role.FB || sp.role == Role.CM)) {
+                        defSlot++
+                        place(sp, atkGoalX - dir * (6.0 + jig(sp, 2.0)), PITCH_H / 2 - 11.0 + defSlot * 4.5)
+                    } else {
+                        place(sp, sp.anchorX + (spX - PITCH_W / 2) * 0.3, sp.anchorY)
+                    }
+                }
+                kicker?.let { place(it, spX - ux * 2.0, spY - uy * 2.0) }
+            }
+
+            SetPiece.CORNER -> {
+                spTicks = 14
+                val nearPostY = if (spY < PITCH_H / 2) PITCH_H / 2 - 3.66 else PITCH_H / 2 + 3.66
+                val farPostY = if (spY < PITCH_H / 2) PITCH_H / 2 + 3.66 else PITCH_H / 2 - 3.66
+                // Defending GK slightly towards the near post
+                place(keeperOf(!spHome), if (spHome) PITCH_W - 0.8 else 0.8, PITCH_H / 2 + (nearPostY - PITCH_H / 2) * 0.3)
+                // A defender on the near post
+                val defOutfield = opps.filter { !it.isGK }.toMutableList()
+                defOutfield.minByOrNull { hypot(it.x - atkGoalX, it.y - nearPostY) }?.let {
+                    place(it, atkGoalX - dir * 1.2, nearPostY)
+                    defOutfield.remove(it)
+                }
+                // Five attackers take up spots in the box; defenders man-mark them goal-side
+                val attackers = side.filter { it !== kicker && !it.isGK }
+                    .sortedByDescending { it.player.attr.physical }
+                    .take(5)
+                attackers.forEachIndexed { i, sp ->
+                    val ax = atkGoalX - dir * (5.0 + (i % 3) * 3.5)
+                    val ay = PITCH_H / 2 - 10.0 + i * 5.0 + jig(sp, 1.5)
+                    place(sp, ax, ay)
+                    val marker = defOutfield.minByOrNull { hypot(it.x - ax, it.y - ay) }
+                    if (marker != null) {
+                        place(marker, ax + dir * 1.2, ay + jig(marker, 0.8))
+                        defOutfield.remove(marker)
+                    }
+                }
+                // Short-corner option
+                side.filter { it !== kicker && it !in attackers && !it.isGK }
+                    .minByOrNull { hypot(it.x - spX, it.y - spY) }
+                    ?.let { place(it, spX - dir * 9.0, spY + (if (spY < PITCH_H / 2) 6.0 else -6.0)) }
+                // Everyone unassigned holds around halfway
+                for (sp in players) {
+                    if (sp.globalIdx !in spTargets && sp !== kicker) {
+                        place(sp, PITCH_W / 2 + jig(sp, 8.0) + (if (sp.home == spHome) dir * 12.0 else -dir * 8.0), sp.anchorY)
+                    }
+                }
+                kicker?.let { place(it, spX, spY) }
+            }
+
+            SetPiece.THROWIN -> {
+                spTicks = 7
+                kicker?.let { place(it, spX, spY) }
+                // Two teammates offer short options; nearest opponents mark them
+                val mates = side.filter { it !== kicker && !it.isGK }
+                    .sortedBy { hypot(it.x - spX, it.y - spY) }
+                    .take(2)
+                val inField = if (spY < PITCH_H / 2) 6.0 else -6.0
+                mates.forEachIndexed { i, sp ->
+                    val mx = spX - dir * (3.0 - i * 8.0)
+                    val my = spY + inField * (1.0 + i * 0.6)
+                    place(sp, mx, my)
+                    opps.filter { !it.isGK && it.globalIdx !in spTargets }
+                        .minByOrNull { hypot(it.x - mx, it.y - my) }
+                        ?.let { place(it, mx + dir * 1.5, my + inField * 0.3) }
+                }
+                for (sp in players) {
+                    if (sp.globalIdx !in spTargets) {
+                        place(sp, sp.anchorX + (spX - PITCH_W / 2) * 0.3, sp.anchorY + (spY - sp.anchorY) * 0.2)
+                    }
+                }
+            }
+
+            SetPiece.NONE -> { phase = Phase.OPEN }
         }
     }
-
-    /** Deterministic per-player offset so set-piece positions don't jitter every tick. */
-    private fun rngStable(sp: SimPlayer, range: Double): Double =
-        ((sp.wobblePhase / 6.28) - 0.5) * 2 * range
 
     private fun executeSetPiece() {
         phase = Phase.OPEN
         val kicker = spKicker
         val type = setPiece
         setPiece = SetPiece.NONE
+        spTargets.clear()
         if (kicker == null) { owner = null; return }
         kicker.x = spX; kicker.y = spY
+        ballX = spX; ballY = spY
         owner = kicker
 
         when (type) {
+            SetPiece.KICKOFF -> {
+                // Tap it back to the nearest teammate
+                val mate = players.filter { it.home == kicker.home && it !== kicker && !it.isGK }
+                    .minByOrNull { hypot(it.x - spX, it.y - spY) }
+                if (mate != null) startFlight(mate.x, mate.y, 12.0, mate)
+            }
             SetPiece.PENALTY -> {
                 addEvent(EventType.INFO, kicker, "${kicker.player.name} steps up...")
                 attemptShot(kicker, penalty = true)
@@ -662,16 +800,19 @@ class MatchEngine(
                 }
             }
             SetPiece.CORNER -> deliverCross(kicker)
-            else -> {}
-        }
-    }
-
-    // Restart after goals once the celebration flight lands
-    private fun maybeKickoff() {
-        val toHome = pendingKickoffToHome ?: return
-        if (flightTicks <= 0) {
-            pendingKickoffToHome = null
-            kickoff(toHome)
+            SetPiece.THROWIN -> {
+                val mate = players.filter { it.home == kicker.home && it !== kicker && !it.isGK }
+                    .minByOrNull { hypot(it.x - spX, it.y - spY) }
+                if (mate != null) {
+                    if (rng.nextDouble() < 0.92) startFlight(mate.x, mate.y, 12.0, mate)
+                    else {
+                        val opp = players.filter { it.home != kicker.home }
+                            .minByOrNull { hypot(it.x - mate.x, it.y - mate.y) }
+                        startFlight(mate.x + 2.0, mate.y + 2.0, 12.0, opp)
+                    }
+                }
+            }
+            SetPiece.NONE -> {}
         }
     }
 }

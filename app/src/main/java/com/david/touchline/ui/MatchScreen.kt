@@ -32,6 +32,13 @@ private val GrassDark = Color(0xFF14572E)
 private val GrassLight = Color(0xFF1A6437)
 private val LineWhite = Color(0xCCFFFFFF)
 
+/**
+ * Playback speed: at 1x the clock advances 7.5 sim frames per real second
+ * (each frame is 2s of match time), i.e. 15 match-seconds per second — a
+ * full 90 minutes plays out in six minutes. 8x skims it in 45 seconds.
+ */
+private const val FRAMES_PER_SEC_1X = 7.5f
+
 @Composable
 fun MatchScreen(vm: GameViewModel) {
     val s = vm.state ?: return
@@ -39,41 +46,38 @@ fun MatchScreen(vm: GameViewModel) {
     val home = s.team(match.homeId)
     val away = s.team(match.awayId)
     val frames = match.frames
-    val lastFrame = frames.size - 1
+    val lastFrame = (frames.size - 1).coerceAtLeast(0)
 
-    var frameIndex by remember { mutableIntStateOf(0) }
+    var frameFloat by remember { mutableFloatStateOf(0f) }
     var playing by remember { mutableStateOf(true) }
     var speed by remember { mutableIntStateOf(1) }
     var mode3d by remember { mutableStateOf(false) }
     var webReady by remember { mutableStateOf(false) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
-    // Each frame = 2 seconds of match time. At 1x, one match minute per real second.
     LaunchedEffect(playing, speed) {
-        while (playing && frameIndex < lastFrame) {
+        while (playing && frameFloat < lastFrame) {
             delay(33)
-            frameIndex = (frameIndex + speed).coerceAtMost(lastFrame)
+            frameFloat = (frameFloat + FRAMES_PER_SEC_1X * 0.033f * speed).coerceAtMost(lastFrame.toFloat())
         }
-        if (frameIndex >= lastFrame) playing = false
+        if (frameFloat >= lastFrame) playing = false
     }
 
-    // Drive the 3D view whenever the frame changes
-    LaunchedEffect(frameIndex, mode3d, webReady) {
+    LaunchedEffect(frameFloat, mode3d, webReady) {
         if (mode3d && webReady) {
-            webViewRef?.evaluateJavascript("sf($frameIndex)", null)
+            webViewRef?.evaluateJavascript("sf($frameFloat)", null)
         }
     }
 
-    val currentTick = frameIndex * 2
+    val currentTick = frameFloat.toInt() * 2
     val shownMinute = ((currentTick / 60) + 1).coerceAtMost(90)
     val homeGoals = match.events.count { it.type == EventType.GOAL && it.teamId == match.homeId && it.tick <= currentTick }
     val awayGoals = match.events.count { it.type == EventType.GOAL && it.teamId == match.awayId && it.tick <= currentTick }
     val visibleEvents = match.events.filter { it.tick <= currentTick && it.type != EventType.CHANCE }
-    val finished = frameIndex >= lastFrame
+    val finished = frameFloat >= lastFrame
 
     Column(Modifier.fillMaxSize().padding(12.dp)) {
 
-        // Scoreboard
         Row(
             Modifier
                 .fillMaxWidth()
@@ -105,7 +109,6 @@ fun MatchScreen(vm: GameViewModel) {
             Spacer(Modifier.weight(1f))
         }
 
-        // Pitch: 2D canvas or 3D WebView
         if (frames.isNotEmpty()) {
             val pitchModifier = Modifier
                 .fillMaxWidth()
@@ -114,15 +117,24 @@ fun MatchScreen(vm: GameViewModel) {
             if (mode3d) {
                 Match3DView(
                     frames = frames,
-                    homeColor = home.colorPrimary,
-                    awayColor = away.colorPrimary,
+                    homePrimary = home.colorPrimary, homeSecondary = home.colorSecondary,
+                    awayPrimary = away.colorPrimary, awaySecondary = away.colorSecondary,
                     onReady = { wv -> webViewRef = wv; webReady = true },
                     modifier = pitchModifier
                 )
             } else {
-                val frame = frames[frameIndex.coerceIn(0, lastFrame)]
+                // Interpolate between the two neighbouring frames for smooth 2D motion
+                val f = frameFloat.coerceIn(0f, lastFrame.toFloat())
+                val i0 = f.toInt()
+                val i1 = (i0 + 1).coerceAtMost(lastFrame)
+                val t = f - i0
+                val a = frames[i0]
+                val b = frames[i1]
+                val lerped = remember(f) {
+                    FloatArray(a.size) { idx -> a[idx] + (b[idx] - a[idx]) * t }
+                }
                 PitchCanvas(
-                    frame = frame,
+                    frame = lerped,
                     homeColor = Color(home.colorPrimary),
                     awayColor = Color(away.colorPrimary),
                     modifier = pitchModifier
@@ -130,7 +142,6 @@ fun MatchScreen(vm: GameViewModel) {
             }
         }
 
-        // Controls
         Row(
             Modifier.fillMaxWidth().padding(top = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -164,7 +175,7 @@ fun MatchScreen(vm: GameViewModel) {
                     )
                 }
                 Spacer(Modifier.weight(1f))
-                TextButton(onClick = { frameIndex = lastFrame; playing = false }) {
+                TextButton(onClick = { frameFloat = lastFrame.toFloat(); playing = false }) {
                     Text("Skip", color = MutedGrass, fontSize = 12.sp)
                 }
             } else {
@@ -176,7 +187,6 @@ fun MatchScreen(vm: GameViewModel) {
             }
         }
 
-        // Match stats at full time
         if (finished) {
             Row(
                 Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -191,7 +201,6 @@ fun MatchScreen(vm: GameViewModel) {
             }
         }
 
-        // Event ticker
         Spacer(Modifier.height(8.dp))
         val listState = rememberLazyListState()
         LaunchedEffect(visibleEvents.size) {
@@ -227,8 +236,8 @@ fun MatchScreen(vm: GameViewModel) {
 @Composable
 fun Match3DView(
     frames: List<FloatArray>,
-    homeColor: Long,
-    awayColor: Long,
+    homePrimary: Long, homeSecondary: Long,
+    awayPrimary: Long, awaySecondary: Long,
     onReady: (WebView) -> Unit,
     modifier: Modifier
 ) {
@@ -240,10 +249,11 @@ fun Match3DView(
                 settings.allowFileAccess = true
                 webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView, url: String) {
-                        val homeHex = String.format("%06X", homeColor.toInt() and 0xFFFFFF)
-                        val awayHex = String.format("%06X", awayColor.toInt() and 0xFFFFFF)
-                        view.evaluateJavascript("init('$homeHex','$awayHex')", null)
-                        // Push frames in chunks to stay under the JS bridge message limit
+                        fun hex(c: Long) = String.format("%06X", c.toInt() and 0xFFFFFF)
+                        view.evaluateJavascript(
+                            "init('${hex(homePrimary)}','${hex(homeSecondary)}','${hex(awayPrimary)}','${hex(awaySecondary)}')",
+                            null
+                        )
                         val perFrame = frames.firstOrNull()?.size ?: 47
                         val chunk = 150
                         var i = 0
@@ -329,7 +339,6 @@ fun PitchCanvas(frame: FloatArray, homeColor: Color, awayColor: Color, modifier:
         drawRect(LineWhite, topLeft = Offset(-3f, goalTop), size = Size(4f, goalH))
         drawRect(LineWhite, topLeft = Offset(w - 1f, goalTop), size = Size(4f, goalH))
 
-        // Players (frame layout: ball xyz at 0..2, players from index 3)
         val r = 5.dp.toPx()
         for (i in 0 until 22) {
             val x = px(frame[3 + i * 2])
@@ -343,7 +352,6 @@ fun PitchCanvas(frame: FloatArray, homeColor: Color, awayColor: Color, modifier:
             drawCircle(Color.White.copy(alpha = 0.8f), radius = r, center = Offset(x, y), style = Stroke(1.5f))
         }
 
-        // Ball: grows and casts a longer shadow when lofted
         val bx = px(frame[0])
         val by = py(frame[1])
         val bz = frame[2]

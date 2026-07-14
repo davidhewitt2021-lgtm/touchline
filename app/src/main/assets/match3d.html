@@ -11,154 +11,252 @@
 </head>
 <body>
 <script>
-// Touchline 3D match viewer.
-// Kotlin pushes frame data in via addFrames(), then drives playback with sf(i).
-// Frame layout: [ballX, ballY, ballZ, p0x, p0y, ..., p21x, p21y] in pitch metres.
+// Touchline 3D match viewer, v2.
+// Kotlin drives playback with sf(f) where f is a FRACTIONAL frame index;
+// positions are interpolated between the two neighbouring frames, so the
+// motion is smooth regardless of sim frame spacing.
+// Frame layout: [ballX, ballY, ballZ, p0x, p0y, ..., p21x, p21y] (metres).
 
 var PW = 105, PH = 68;
 var frames = [];
-var players = [], shadows = [];
+var players = [];        // { group, body, legL, legR, shadow, runPhase, px, pz, faceAngle }
 var ball, ballShadow;
 var scene, camera, renderer;
-var homeCol = 0xd32f2f, awayCol = 0x1565c0;
-var curFrame = 0;
+var skinTones = [0xC8956D, 0x8D5524, 0xE0AC69, 0x5C3A21, 0xF1C27D, 0x3B2219];
 
-function init(homeColor, awayColor) {
-  homeCol = parseInt(homeColor, 16);
-  awayCol = parseInt(awayColor, 16);
+function init(homeP, homeS, awayP, awayS) {
+  var hp = parseInt(homeP, 16), hs = parseInt(homeS, 16);
+  var ap = parseInt(awayP, 16), as = parseInt(awayS, 16);
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0B1A12);
-  scene.fog = new THREE.Fog(0x0B1A12, 120, 260);
+  scene.fog = new THREE.Fog(0x0B1A12, 140, 300);
 
-  camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.1, 500);
+  camera = new THREE.PerspectiveCamera(36, window.innerWidth / window.innerHeight, 0.1, 500);
+  camera.position.set(PW / 2, 30, PH + 40);
 
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   document.body.appendChild(renderer.domElement);
 
-  // Lighting: flat ambient + one directional "floodlight"
-  scene.add(new THREE.AmbientLight(0xffffff, 0.75));
-  var sun = new THREE.DirectionalLight(0xfffbe8, 0.7);
-  sun.position.set(40, 80, 20);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+  var sun = new THREE.DirectionalLight(0xfffbe8, 0.65);
+  sun.position.set(40, 90, 30);
   scene.add(sun);
 
   buildPitch();
-  buildPlayers();
+  buildStands();
+  for (var i = 0; i < 22; i++) {
+    var isHome = i < 11;
+    var isGK = (i === 0 || i === 11);
+    players.push(makePlayer(
+      isGK ? 0x37E6C0 : (isHome ? hp : ap),
+      isGK ? 0x0E2015 : (isHome ? hs : as),
+      i
+    ));
+  }
   buildBall();
 
   window.addEventListener('resize', onResize);
-  render();
+  renderer.render(scene, camera);
 }
 
 function onResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
-  render();
+  renderer.render(scene, camera);
 }
+
+// --------------------------------------------------------------- pitch ----
 
 function stripeTexture() {
   var c = document.createElement('canvas');
   c.width = 512; c.height = 512;
   var g = c.getContext('2d');
-  var stripes = 10;
-  for (var i = 0; i < stripes; i++) {
+  for (var i = 0; i < 10; i++) {
     g.fillStyle = (i % 2 === 0) ? '#14572E' : '#1A6437';
-    g.fillRect(i * c.width / stripes, 0, c.width / stripes + 1, c.height);
+    g.fillRect(i * 51.2, 0, 52.2, 512);
   }
-  var tex = new THREE.CanvasTexture(c);
-  return tex;
+  return new THREE.CanvasTexture(c);
 }
 
 function buildPitch() {
-  // Grass (sim x -> three x, sim y -> three z)
   var grass = new THREE.Mesh(
-    new THREE.PlaneGeometry(PW + 14, PH + 14),
+    new THREE.PlaneGeometry(PW + 16, PH + 16),
     new THREE.MeshLambertMaterial({ map: stripeTexture() })
   );
   grass.rotation.x = -Math.PI / 2;
   grass.position.set(PW / 2, 0, PH / 2);
   scene.add(grass);
 
-  // White lines drawn on a slightly raised transparent canvas plane
   var c = document.createElement('canvas');
   c.width = 1050; c.height = 680;
   var g = c.getContext('2d');
   g.strokeStyle = 'rgba(255,255,255,0.85)';
+  g.fillStyle = 'rgba(255,255,255,0.85)';
   g.lineWidth = 3;
-  function box(x, y, w, h) { g.strokeRect(x, y, w, h); }
-  box(2, 2, 1046, 676);                       // outline
-  g.beginPath(); g.moveTo(525, 2); g.lineTo(525, 678); g.stroke();  // halfway
-  g.beginPath(); g.arc(525, 340, 91.5, 0, Math.PI * 2); g.stroke(); // centre circle
-  box(2, 138.5, 165, 403);                    // penalty boxes
-  box(883, 138.5, 165, 403);
-  box(2, 248.5, 55, 183);                     // six-yard boxes
-  box(993, 248.5, 55, 183);
-  g.beginPath(); g.arc(110, 340, 4, 0, Math.PI * 2); g.fillStyle = 'rgba(255,255,255,0.85)'; g.fill(); // pen spots
+  g.strokeRect(2, 2, 1046, 676);
+  g.beginPath(); g.moveTo(525, 2); g.lineTo(525, 678); g.stroke();
+  g.beginPath(); g.arc(525, 340, 91.5, 0, Math.PI * 2); g.stroke();
+  g.strokeRect(2, 138.5, 165, 403);
+  g.strokeRect(883, 138.5, 165, 403);
+  g.strokeRect(2, 248.5, 55, 183);
+  g.strokeRect(993, 248.5, 55, 183);
+  g.beginPath(); g.arc(110, 340, 4, 0, Math.PI * 2); g.fill();
   g.beginPath(); g.arc(940, 340, 4, 0, Math.PI * 2); g.fill();
-  var lineTex = new THREE.CanvasTexture(c);
   var lines = new THREE.Mesh(
     new THREE.PlaneGeometry(PW, PH),
-    new THREE.MeshBasicMaterial({ map: lineTex, transparent: true })
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true })
   );
   lines.rotation.x = -Math.PI / 2;
   lines.position.set(PW / 2, 0.02, PH / 2);
   scene.add(lines);
 
-  // Goals: posts + crossbar at each end
-  var postMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-  function goal(atX) {
-    var g1 = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 2.44, 6), postMat);
-    g1.position.set(atX, 1.22, PH / 2 - 3.66);
-    var g2 = g1.clone(); g2.position.z = PH / 2 + 3.66;
-    var bar = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 7.32, 6), postMat);
-    bar.rotation.x = Math.PI / 2;
-    bar.position.set(atX, 2.44, PH / 2);
-    scene.add(g1); scene.add(g2); scene.add(bar);
-  }
-  goal(0); goal(PW);
+  buildGoal(0, 1);
+  buildGoal(PW, -1);
+  buildFlags();
 }
 
-function makePlayer(color, isGK) {
-  var group = new THREE.Group();
-  var col = isGK ? 0x37E6C0 : color;
-  var body = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.45, 0.55, 1.3, 8),
-    new THREE.MeshLambertMaterial({ color: col })
-  );
-  body.position.y = 0.85;
-  var head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.32, 8, 8),
-    new THREE.MeshLambertMaterial({ color: 0xC8956D })
-  );
-  head.position.y = 1.75;
-  group.add(body); group.add(head);
-  return group;
+function netTexture() {
+  var c = document.createElement('canvas');
+  c.width = 64; c.height = 64;
+  var g = c.getContext('2d');
+  g.strokeStyle = 'rgba(255,255,255,0.45)';
+  g.lineWidth = 1;
+  for (var i = 0; i <= 64; i += 8) {
+    g.beginPath(); g.moveTo(i, 0); g.lineTo(i, 64); g.stroke();
+    g.beginPath(); g.moveTo(0, i); g.lineTo(64, i); g.stroke();
+  }
+  var t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
 }
+
+function buildGoal(atX, dirIn) {
+  var postMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+  var p1 = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 2.44, 6), postMat);
+  p1.position.set(atX, 1.22, PH / 2 - 3.66);
+  var p2 = p1.clone(); p2.position.z = PH / 2 + 3.66;
+  var bar = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 7.32, 6), postMat);
+  bar.rotation.x = Math.PI / 2;
+  bar.position.set(atX, 2.44, PH / 2);
+  scene.add(p1); scene.add(p2); scene.add(bar);
+
+  var netMat = new THREE.MeshBasicMaterial({ map: netTexture(), transparent: true, side: THREE.DoubleSide });
+  var back = new THREE.Mesh(new THREE.PlaneGeometry(7.32, 2.2), netMat);
+  back.material.map.repeat.set(4, 1.5);
+  back.rotation.y = Math.PI / 2;
+  back.position.set(atX - dirIn * 1.6, 1.1, PH / 2);
+  scene.add(back);
+  var roof = new THREE.Mesh(new THREE.PlaneGeometry(7.32, 1.7), netMat.clone());
+  roof.rotation.set(Math.PI / 2, Math.PI / 2, 0);
+  roof.position.set(atX - dirIn * 0.8, 2.35, PH / 2);
+  scene.add(roof);
+  for (var s = -1; s <= 1; s += 2) {
+    var sideN = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 2.2), netMat.clone());
+    sideN.position.set(atX - dirIn * 0.8, 1.1, PH / 2 + s * 3.66);
+    scene.add(sideN);
+  }
+}
+
+function buildFlags() {
+  var poleMat = new THREE.MeshLambertMaterial({ color: 0xeeeeee });
+  var flagMat = new THREE.MeshBasicMaterial({ color: 0xA8F04B, side: THREE.DoubleSide });
+  [[0, 0], [0, PH], [PW, 0], [PW, PH]].forEach(function (c) {
+    var pole = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.5, 4), poleMat);
+    pole.position.set(c[0], 0.75, c[1]);
+    scene.add(pole);
+    var flag = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.35), flagMat);
+    flag.position.set(c[0] + (c[0] === 0 ? 0.25 : -0.25), 1.3, c[1]);
+    scene.add(flag);
+  });
+}
+
+function buildStands() {
+  var standMat = new THREE.MeshLambertMaterial({ color: 0x101f16 });
+  var seatMat = new THREE.MeshLambertMaterial({ color: 0x18301f });
+  function stand(x, z, w, d, rot) {
+    var base = new THREE.Mesh(new THREE.BoxGeometry(w, 6, d), standMat);
+    base.position.set(x, 3, z);
+    base.rotation.y = rot;
+    scene.add(base);
+    var tier = new THREE.Mesh(new THREE.BoxGeometry(w, 3.5, d * 0.6), seatMat);
+    tier.position.set(x, 7.5, z);
+    tier.rotation.y = rot;
+    scene.add(tier);
+  }
+  stand(PW / 2, -12, PW + 24, 9, 0);            // far side
+  stand(-14, PH / 2, PH + 10, 9, Math.PI / 2);  // ends
+  stand(PW + 14, PH / 2, PH + 10, 9, Math.PI / 2);
+}
+
+// -------------------------------------------------------------- actors ----
 
 function blobShadow(r) {
   var m = new THREE.Mesh(
     new THREE.CircleGeometry(r, 12),
-    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.3 })
+    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28 })
   );
   m.rotation.x = -Math.PI / 2;
   m.position.y = 0.03;
   return m;
 }
 
-function buildPlayers() {
-  for (var i = 0; i < 22; i++) {
-    var isHome = i < 11;
-    var isGK = (i === 0 || i === 11);
-    var p = makePlayer(isHome ? homeCol : awayCol, isGK);
-    scene.add(p);
-    players.push(p);
-    var s = blobShadow(0.55);
-    scene.add(s);
-    shadows.push(s);
-  }
+function makePlayer(kitCol, shortsCol, idx) {
+  var group = new THREE.Group();
+  var skin = skinTones[idx % skinTones.length];
+  var skinMat = new THREE.MeshLambertMaterial({ color: skin });
+
+  // Torso (kit)
+  var body = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.34, 0.42, 0.75, 8),
+    new THREE.MeshLambertMaterial({ color: kitCol })
+  );
+  body.position.y = 1.05;
+  group.add(body);
+
+  // Shorts
+  var shorts = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.30, 0.34, 0.30, 8),
+    new THREE.MeshLambertMaterial({ color: shortsCol })
+  );
+  shorts.position.y = 0.55;
+  group.add(shorts);
+
+  // Legs (animated)
+  var legGeo = new THREE.CylinderGeometry(0.10, 0.09, 0.55, 6);
+  var legL = new THREE.Mesh(legGeo, skinMat);
+  var legR = new THREE.Mesh(legGeo, skinMat);
+  // Pivot at the hip: offset geometry downwards
+  legGeo.translate(0, -0.22, 0);
+  legL.position.set(0.13, 0.42, 0);
+  legR.position.set(-0.13, 0.42, 0);
+  group.add(legL); group.add(legR);
+
+  // Arms (static, slight angle)
+  var armGeo = new THREE.CylinderGeometry(0.07, 0.06, 0.55, 6);
+  var armL = new THREE.Mesh(armGeo, new THREE.MeshLambertMaterial({ color: kitCol }));
+  armL.position.set(0.42, 1.05, 0); armL.rotation.z = 0.25;
+  var armR = armL.clone(); armR.position.x = -0.42; armR.rotation.z = -0.25;
+  group.add(armL); group.add(armR);
+
+  // Head + hair
+  var head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 8, 8), skinMat);
+  head.position.y = 1.65;
+  group.add(head);
+  var hair = new THREE.Mesh(
+    new THREE.SphereGeometry(0.25, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.45),
+    new THREE.MeshLambertMaterial({ color: (idx % 4 === 0) ? 0x2A1B10 : 0x120D08 })
+  );
+  hair.position.y = 1.68;
+  group.add(hair);
+
+  var shadow = blobShadow(0.5);
+  scene.add(shadow);
+  scene.add(group);
+  return { group: group, legL: legL, legR: legR, shadow: shadow, runPhase: Math.random() * 6.28, px: 0, pz: 0, faceAngle: 0 };
 }
 
 function buildBall() {
@@ -171,45 +269,76 @@ function buildBall() {
   scene.add(ballShadow);
 }
 
-// ---- data + playback (driven from Kotlin) ----
+// ----------------------------------------------------- data + playback ----
 
 function addFrames(flat, perFrame) {
-  // flat: array of numbers, perFrame values per frame
   for (var i = 0; i + perFrame <= flat.length; i += perFrame) {
     frames.push(flat.slice(i, i + perFrame));
   }
 }
 
-var camX = 52.5;
-function sf(i) {   // setFrame
-  if (frames.length === 0) return;
-  curFrame = Math.max(0, Math.min(i, frames.length - 1));
-  var f = frames[curFrame];
-  var bx = f[0], by = f[1], bz = f[2];
-
-  ball.position.set(bx, 0.24 + bz, by);
-  ballShadow.position.set(bx, 0.03, by);
-  ballShadow.material.opacity = Math.max(0.08, 0.3 - bz * 0.05);
-
-  for (var p = 0; p < 22; p++) {
-    var px = f[3 + p * 2], py = f[4 + p * 2];
-    var g = players[p];
-    // Face direction of travel
-    var dx = px - g.position.x, dz = py - g.position.z;
-    if (dx * dx + dz * dz > 0.0004) g.rotation.y = Math.atan2(dx, dz);
-    g.position.set(px, 0, py);
-    shadows[p].position.set(px, 0.03, py);
-  }
-
-  // TV camera: high side-line view easing after the ball
-  camX += (bx - camX) * 0.06;
-  camera.position.set(camX, 34, PH + 42);
-  camera.lookAt(camX * 0.85 + bx * 0.15, 0, by * 0.5 + PH * 0.25);
-
-  render();
+function lerp(a, b, t) { return a + (b - a) * t; }
+function angLerp(a, b, t) {
+  var d = b - a;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
 }
 
-function render() { renderer.render(scene, camera); }
+var camX = 52.5, lookX = 52.5, lookZ = 34;
+
+function sf(f) {   // set fractional frame
+  if (frames.length === 0) return;
+  f = Math.max(0, Math.min(f, frames.length - 1.001));
+  var i0 = Math.floor(f);
+  var i1 = Math.min(i0 + 1, frames.length - 1);
+  var t = f - i0;
+  var A = frames[i0], B = frames[i1];
+
+  var bx = lerp(A[0], B[0], t), by = lerp(A[1], B[1], t), bz = lerp(A[2], B[2], t);
+  ball.position.set(bx, 0.24 + bz, by);
+  ball.rotation.x += 0.25; // rolling spin
+  ballShadow.position.set(bx, 0.03, by);
+  ballShadow.material.opacity = Math.max(0.06, 0.28 - bz * 0.045);
+
+  for (var p = 0; p < 22; p++) {
+    var px = lerp(A[3 + p * 2], B[3 + p * 2], t);
+    var pz = lerp(A[4 + p * 2], B[4 + p * 2], t);
+    var pl = players[p];
+    var dx = px - pl.px, dz = pz - pl.pz;
+    var sp = Math.sqrt(dx * dx + dz * dz);
+
+    // Face direction of travel, turning smoothly
+    if (sp > 0.005) {
+      pl.faceAngle = angLerp(pl.faceAngle, Math.atan2(dx, dz), 0.25);
+    }
+    pl.group.rotation.y = pl.faceAngle;
+    // Lean into the run
+    pl.group.rotation.x = Math.min(sp * 1.4, 0.22);
+
+    // Leg swing scaled by speed
+    pl.runPhase += sp * 4.5;
+    var swing = Math.min(sp * 5.0, 0.75);
+    pl.legL.rotation.x = Math.sin(pl.runPhase) * swing;
+    pl.legR.rotation.x = -Math.sin(pl.runPhase) * swing;
+    // Bob
+    var bob = Math.abs(Math.sin(pl.runPhase)) * Math.min(sp * 0.5, 0.06);
+
+    pl.group.position.set(px, bob, pz);
+    pl.shadow.position.set(px, 0.03, pz);
+    pl.px = px; pl.pz = pz;
+  }
+
+  // Smooth TV camera: eased position and eased look-target, both clamped
+  camX += (bx - camX) * 0.035;
+  camX = Math.max(20, Math.min(PW - 20, camX));
+  lookX += (bx - lookX) * 0.07;
+  lookZ += (by - lookZ) * 0.07;
+  camera.position.set(camX, 30, PH + 40);
+  camera.lookAt(lookX, 0.5, lookZ * 0.6 + PH * 0.2);
+
+  renderer.render(scene, camera);
+}
 </script>
 </body>
 </html>
